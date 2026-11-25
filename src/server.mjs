@@ -3,7 +3,11 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { ChatLoopError, runChatLoop } from "./chat-loop.mjs";
+import { assertModelAvailable, CapacityError, filterModelsByCapacity, inspectCapacity } from "./capacity.mjs";
 import { parseConfig } from "./config.mjs";
+import { ToolboxMcpBridge } from "./mcp-bridge.mjs";
+import { createUpstreamClient, UpstreamError } from "./upstream.mjs";
 
 const MODEL_ID = "toolbox-spike";
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -26,11 +30,11 @@ function sendJson(response, status, body, extraHeaders = {}) {
   response.end(text);
 }
 
-function sendError(response, status, message, code, extraHeaders = {}) {
+function sendError(response, status, message, code, extraHeaders = {}, details = undefined) {
   sendJson(
     response,
     status,
-    { error: { message, type: "invalid_request_error", param: null, code } },
+    { error: { message, type: "invalid_request_error", param: null, code, ...(details ? { details } : {}) } },
     extraHeaders,
   );
 }
@@ -75,7 +79,7 @@ function baseCompletion(config, payload) {
     id: `chatcmpl-${randomUUID()}`,
     object: "chat.completion.chunk",
     created: Math.floor(Date.now() / 1000),
-    model: MODEL_ID,
+    model: payload?.model ?? config.models?.[0]?.id ?? MODEL_ID,
     system_fingerprint: `toolbox-router-${config.mode}`,
   };
 }
@@ -178,6 +182,132 @@ function streamCompletion(response, config, payload, shouldCallTool) {
   response.end();
 }
 
+function assistantText(message) {
+  if (typeof message?.content === "string") return message.content;
+  if (!Array.isArray(message?.content)) return "";
+  return message.content
+    .filter((part) => part?.type === "text" && typeof part.text === "string")
+    .map((part) => part.text)
+    .join("");
+}
+
+function streamBridgeResult(response, config, payload, result) {
+  response.writeHead(200, {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-cache",
+    connection: "keep-alive",
+    "x-accel-buffering": "no",
+  });
+  response.flushHeaders();
+
+  const completion = baseCompletion(config, payload);
+  streamEvent(response, {
+    ...completion,
+    choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }],
+  });
+
+  const content = assistantText(result.message);
+  if (content) {
+    streamEvent(response, {
+      ...completion,
+      choices: [{ index: 0, delta: { content }, finish_reason: null }],
+    });
+  }
+
+  const toolCalls = Array.isArray(result.message.tool_calls) ? result.message.tool_calls : [];
+  for (const [index, toolCall] of toolCalls.entries()) {
+    streamEvent(response, {
+      ...completion,
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [
+              {
+                index,
+                id: toolCall.id,
+                type: "function",
+                function: { name: toolCall.function.name, arguments: "" },
+              },
+            ],
+          },
+          finish_reason: null,
+        },
+      ],
+    });
+    streamEvent(response, {
+      ...completion,
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [{ index, function: { arguments: toolCall.function.arguments } }],
+          },
+          finish_reason: null,
+        },
+      ],
+    });
+  }
+
+  streamEvent(response, {
+    ...completion,
+    choices: [{ index: 0, delta: {}, finish_reason: result.finishReason }],
+  });
+  response.write("data: [DONE]\n\n");
+  response.end();
+}
+
+function sendBridgeResult(response, config, payload, result) {
+  if (payload.stream === true) {
+    streamBridgeResult(response, config, payload, result);
+    return;
+  }
+
+  sendJson(response, 200, {
+    ...baseCompletion(config, payload),
+    object: "chat.completion",
+    choices: [
+      {
+        index: 0,
+        message: result.message,
+        logprobs: null,
+        finish_reason: result.finishReason,
+      },
+    ],
+    usage: result.usage,
+    toolbox: { rounds: result.rounds },
+  });
+}
+
+function sanitizeErrorMessage(message, apiKey) {
+  const text = apiKey ? String(message).replaceAll(apiKey, "[redacted]") : String(message);
+  return text
+    .replace(/Bearer\s+[^\s"']+/gi, "Bearer [redacted]")
+    .slice(0, 1000);
+}
+
+function safeErrorType(error) {
+  const value = error?.name;
+  return typeof value === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(value) ? value : "Error";
+}
+
+function safeErrorCode(error) {
+  const value = error?.code;
+  return typeof value === "string" && /^[a-z0-9_]{1,64}$/.test(value) ? value : "internal_error";
+}
+
+function clientErrorMessage(error) {
+  if (error instanceof HttpError || error instanceof ChatLoopError || error instanceof CapacityError) return error.message;
+  if (error instanceof UpstreamError) {
+    if (error.code === "upstream_timeout") return "Upstream Chat Completions request timed out";
+    if (error.status >= 400 && error.status <= 599) {
+      return `Upstream Chat Completions failed with HTTP ${error.status}`;
+    }
+    return "Upstream Chat Completions request failed";
+  }
+  return "Internal server error";
+}
+
 function completeChat(response, config, payload) {
   const shouldCallTool =
     payload.tool_choice === "required" && Array.isArray(payload.tools) && payload.tools.length > 0;
@@ -214,13 +344,55 @@ function completeChat(response, config, payload) {
   });
 }
 
-export function createRouterServer({ config, logger = console }) {
+export function createRouterServer({
+  config,
+  logger = console,
+  bridge = null,
+  upstream = null,
+  getCapacity = () => inspectCapacity(config),
+  shutdownSignal,
+  isShuttingDown = () => false,
+}) {
+  const readCapacity = async () => {
+    try {
+      return await getCapacity();
+    } catch (error) {
+      logger.error(
+        JSON.stringify({
+          event: "capacity_error",
+          message: sanitizeErrorMessage(error.message, config.upstream?.apiKey ?? ""),
+        }),
+      );
+      return {
+        ok: false,
+        drive: "D:",
+        modelRoot: config.modelRoot,
+        freeBytes: 0,
+        reserveBytes: config.minFreeBytes,
+        availableBytes: 0,
+        error: sanitizeErrorMessage(error.message, config.upstream?.apiKey ?? ""),
+      };
+    }
+  };
+
   return createServer(async (request, response) => {
     try {
+      if (isShuttingDown()) {
+        sendError(response, 503, "Router is shutting down", "router_shutting_down");
+        return;
+      }
       const url = new URL(request.url, "http://toolbox-router.local");
 
       if (request.method === "GET" && url.pathname === "/health") {
-        sendJson(response, 200, { ok: true, service: "toolbox-router", mode: config.mode });
+        const ok = config.mode === "mock" || bridge?.ready === true;
+        const capacity = await readCapacity();
+        sendJson(response, 200, {
+          ok,
+          service: "toolbox-router",
+          mode: config.mode,
+          capacity,
+          ...(config.mode === "bridge" ? { mcp: bridge?.status?.() ?? { ready: false, toolCount: 0 } } : {}),
+        });
         return;
       }
 
@@ -232,16 +404,17 @@ export function createRouterServer({ config, logger = console }) {
       }
 
       if (request.method === "GET" && url.pathname === "/v1/models") {
+        const capacity = await readCapacity();
+        const models = filterModelsByCapacity(config.models, capacity);
         sendJson(response, 200, {
           object: "list",
-          data: [
-            {
-              id: MODEL_ID,
-              object: "model",
-              created: 0,
-              owned_by: "toolbox-router",
-            },
-          ],
+          data: models.map((model) => ({
+            id: model.id,
+            object: "model",
+            created: 0,
+            owned_by: "toolbox-router",
+          })),
+          capacity,
         });
         return;
       }
@@ -259,12 +432,29 @@ export function createRouterServer({ config, logger = console }) {
           }),
         );
 
-        if (payload?.model !== MODEL_ID) {
+        const selectedModel = config.models.find((model) => model.id === payload?.model);
+        if (!selectedModel) {
           throw new HttpError(404, `Unknown model: ${payload?.model ?? "(missing)"}`, "model_not_found");
         }
+        assertModelAvailable(selectedModel, await readCapacity());
 
         if (!Array.isArray(payload.messages)) {
           throw new HttpError(400, "messages must be an array", "invalid_messages");
+        }
+
+        if (config.mode === "bridge") {
+          if (!upstream) throw new HttpError(503, "Upstream model is not configured", "upstream_not_ready");
+          const result = await runChatLoop({
+            payload,
+            config,
+            upstream,
+            upstreamModel: selectedModel.upstreamModel,
+            bridge,
+            logger,
+            signal: shutdownSignal,
+          });
+          sendBridgeResult(response, config, payload, result);
+          return;
         }
 
         completeChat(response, config, payload);
@@ -277,10 +467,32 @@ export function createRouterServer({ config, logger = console }) {
         sendError(response, error.status, error.message, error.code);
         return;
       }
+      if (error instanceof ChatLoopError && error.code === "request_cancelled") {
+        if (!response.headersSent) {
+          sendError(response, error.status, error.message, error.code);
+        } else {
+          response.end();
+        }
+        return;
+      }
 
-      logger.error(JSON.stringify({ event: "server_error", message: error.message }));
+      logger.error(
+        JSON.stringify({
+          event: "server_error",
+          error_type: safeErrorType(error),
+          code: safeErrorCode(error),
+        }),
+      );
       if (!response.headersSent) {
-        sendError(response, 500, "Internal server error", "internal_error");
+        const status = error.status >= 400 && error.status <= 599 ? error.status : 500;
+        sendError(
+          response,
+          status,
+          clientErrorMessage(error),
+          safeErrorCode(error),
+          {},
+          error instanceof HttpError || error instanceof CapacityError ? error.details : undefined,
+        );
       } else {
         response.end();
       }
@@ -288,35 +500,124 @@ export function createRouterServer({ config, logger = console }) {
   });
 }
 
-function start() {
+async function start() {
   const config = parseConfig();
-  const server = createRouterServer({ config });
+  const logger = console;
+  const bridge = config.mode === "bridge" ? new ToolboxMcpBridge({ config, logger }) : null;
+  const upstream =
+    config.mode === "bridge"
+      ? createUpstreamClient({ ...config.upstream, logger })
+      : null;
   let shuttingDown = false;
+  const shutdownController = new AbortController();
+  const server = createRouterServer({
+    config,
+    logger,
+    bridge,
+    upstream,
+    shutdownSignal: shutdownController.signal,
+    isShuttingDown: () => shuttingDown,
+  });
 
-  const shutdown = () => {
+  const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
-    server.close(() => process.exit(0));
-    server.closeAllConnections();
+    shutdownController.abort();
+    logger.info(JSON.stringify({ event: "shutdown_started" }));
+
+    try {
+      if (bridge) await bridge.close();
+      logger.info(JSON.stringify({ event: "mcp_shutdown_complete" }));
+    } catch (error) {
+      logger.error(
+        JSON.stringify({
+          event: "mcp_shutdown_error",
+          error_type: safeErrorType(error),
+        }),
+      );
+      process.exitCode = 1;
+    }
+
+    await new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(finish, 1_000);
+      timer.unref();
+      server.close(finish);
+      server.closeIdleConnections();
+      server.closeAllConnections();
+    });
+    logger.info(JSON.stringify({ event: "shutdown_complete" }));
+    process.exitCode = process.exitCode ?? 0;
+    if (process.connected) process.disconnect();
   };
 
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
+  // The launcher owns an IPC channel so it can request graceful cleanup on
+  // Windows, where child.kill() cannot deliver a catchable SIGTERM.
+  process.on("message", (message) => {
+    if (message?.type === "shutdown") void shutdown();
+  });
+
+  if (shuttingDown) return;
+  if (bridge) {
+    try {
+      await bridge.start();
+    } catch (error) {
+      if (!shuttingDown) {
+        logger.error(
+          JSON.stringify({
+            event: "mcp_startup_error",
+            error_type: safeErrorType(error),
+          }),
+        );
+      }
+    }
+  }
+  if (shuttingDown) return;
+
+  let capacity;
+  try {
+    capacity = await inspectCapacity(config);
+  } catch (error) {
+    capacity = {
+      ok: false,
+      drive: "D:",
+      availableBytes: 0,
+      error: sanitizeErrorMessage(error.message, config.upstream?.apiKey ?? ""),
+    };
+    logger.error(JSON.stringify({ event: "capacity_error", message: capacity.error }));
+  }
+  if (shuttingDown) return;
 
   server.on("error", (error) => {
-    console.error(JSON.stringify({ event: "listen_error", message: error.message }));
-    process.exit(1);
+    logger.error(
+      JSON.stringify({
+        event: "listen_error",
+        message: sanitizeErrorMessage(error.message, config.upstream?.apiKey ?? ""),
+      }),
+    );
+    void shutdown().finally(() => process.exit(1));
   });
 
   server.listen(config.port, config.host, () => {
-    console.log(
+    logger.info(
       JSON.stringify({
         event: "ready",
         host: config.host,
         port: config.port,
         base_url: `http://${config.host}:${config.port}/v1`,
-        model: MODEL_ID,
+        model: config.models[0].id,
         mode: config.mode,
+        ready: config.mode === "mock" || bridge?.ready === true,
+        capacity,
+        ...(bridge ? { mcp: bridge.status() } : {}),
       }),
     );
   });

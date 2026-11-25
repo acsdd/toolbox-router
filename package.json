@@ -10,8 +10,11 @@
   "scripts": {
     "start": "node src/server.mjs",
     "dev": "node --watch src/server.mjs",
-    "test": "node --test",
-    "check": "node --check src/config.mjs && node --check src/server.mjs && node --check scripts/launch-spike.mjs",
+    "test": "node --test \"test/*.test.mjs\"",
+    "check": "node --check src/config.mjs && node --check src/server.mjs && node --check src/tool-policy.mjs && node --check src/mcp-bridge.mjs && node --check src/upstream.mjs && node --check src/chat-loop.mjs && node --check src/capacity.mjs && node --check scripts/launch-spike.mjs",
     "spike": "node scripts/launch-spike.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2"
   }
 }
