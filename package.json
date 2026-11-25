@@ -1,0 +1,17 @@
+{
+  "name": "toolbox-router",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first hybrid model gateway for Qoder",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "dev": "node --watch src/server.mjs",
+    "test": "node --test",
+    "check": "node --check src/config.mjs && node --check src/server.mjs && node --check scripts/launch-spike.mjs",
+    "spike": "node scripts/launch-spike.mjs"
+  }
+}
