@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { ChatLoopError, runChatLoop } from "./chat-loop.mjs";
 import { assertModelAvailable, CapacityError, filterModelsByCapacity, inspectCapacity } from "./capacity.mjs";
-import { parseConfig } from "./config.mjs";
+import { assertSecureRouterKey, parseConfig } from "./config.mjs";
 import { ToolboxMcpBridge } from "./mcp-bridge.mjs";
 import { createUpstreamClient, UpstreamError } from "./upstream.mjs";
 
@@ -300,6 +300,7 @@ function clientErrorMessage(error) {
   if (error instanceof HttpError || error instanceof ChatLoopError || error instanceof CapacityError) return error.message;
   if (error instanceof UpstreamError) {
     if (error.code === "upstream_timeout") return "Upstream Chat Completions request timed out";
+    if (error.status === 402) return "The model provider requires payment or account access. Check your provider account or select another available model.";
     if (error.status >= 400 && error.status <= 599) {
       return `Upstream Chat Completions failed with HTTP ${error.status}`;
     }
@@ -421,21 +422,23 @@ export function createRouterServer({
 
       if (request.method === "POST" && url.pathname === "/v1/chat/completions") {
         const payload = await readJson(request);
+        const selectedModel = config.models.find((model) => model.id === payload?.model);
+        if (!selectedModel) {
+          throw new HttpError(404, `Unknown model: ${payload?.model ?? "(missing)"}`, "model_not_found");
+        }
         logger.info(
           JSON.stringify({
             event: "chat_request",
-            model: payload?.model,
+            model: selectedModel.id,
             stream: payload?.stream === true,
-            tool_choice: payload?.tool_choice,
+            tool_choice: ["auto", "none", "required"].includes(payload?.tool_choice)
+              ? payload.tool_choice
+              : payload?.tool_choice && typeof payload.tool_choice === "object" ? "specific" : "unspecified",
             tool_count: Array.isArray(payload?.tools) ? payload.tools.length : 0,
             message_count: Array.isArray(payload?.messages) ? payload.messages.length : 0,
           }),
         );
 
-        const selectedModel = config.models.find((model) => model.id === payload?.model);
-        if (!selectedModel) {
-          throw new HttpError(404, `Unknown model: ${payload?.model ?? "(missing)"}`, "model_not_found");
-        }
         assertModelAvailable(selectedModel, await readCapacity());
 
         if (!Array.isArray(payload.messages)) {
@@ -444,15 +447,18 @@ export function createRouterServer({
 
         if (config.mode === "bridge") {
           if (!upstream) throw new HttpError(503, "Upstream model is not configured", "upstream_not_ready");
-          const result = await runChatLoop({
-            payload,
-            config,
-            upstream,
-            upstreamModel: selectedModel.upstreamModel,
-            bridge,
-            logger,
-            signal: shutdownSignal,
-          });
+          const clientAbort = new AbortController();
+          const onClose = () => { if (!response.writableFinished) clientAbort.abort(); };
+          response.once("close", onClose);
+          if (response.destroyed) clientAbort.abort();
+          const signal = shutdownSignal ? AbortSignal.any([shutdownSignal, clientAbort.signal]) : clientAbort.signal;
+          let result;
+          try {
+            result = await runChatLoop({ payload, config, upstream, upstreamModel: selectedModel.upstreamModel, bridge, logger, signal });
+          } finally {
+            response.off("close", onClose);
+          }
+          if (response.destroyed) return;
           sendBridgeResult(response, config, payload, result);
           return;
         }
@@ -463,6 +469,7 @@ export function createRouterServer({
 
       sendError(response, 404, "Not found", "not_found");
     } catch (error) {
+      if (response.destroyed) return;
       if (error instanceof HttpError) {
         sendError(response, error.status, error.message, error.code);
         return;
@@ -484,7 +491,7 @@ export function createRouterServer({
         }),
       );
       if (!response.headersSent) {
-        const status = error.status >= 400 && error.status <= 599 ? error.status : 500;
+        const status = error.status >= 400 && error.status <= 599 ? error.status : error instanceof UpstreamError ? 502 : 500;
         sendError(
           response,
           status,
@@ -502,6 +509,7 @@ export function createRouterServer({
 
 async function start() {
   const config = parseConfig();
+  assertSecureRouterKey(config);
   const logger = console;
   const bridge = config.mode === "bridge" ? new ToolboxMcpBridge({ config, logger }) : null;
   const upstream =

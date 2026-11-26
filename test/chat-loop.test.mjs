@@ -116,6 +116,17 @@ test("chat loop relaxes forced tool choice after executing tools so the model ca
   assert.equal(requests[1].tool_choice, "auto");
 });
 
+test("chat loop preserves provider tool-call metadata across a tool round", async () => {
+  const requests = [];
+  const call = { ...toolCall("system_stats"), extra_content: { google: { thought_signature: "opaque-test-signature" } } };
+  const upstream = scriptedUpstream([
+    completion({ role: "assistant", content: null, tool_calls: [call] }),
+    completion({ role: "assistant", content: "done" }),
+  ], requests);
+  await run({}, upstream);
+  assert.deepEqual(requests[1].messages.at(-2).tool_calls[0].extra_content, call.extra_content);
+});
+
 test("chat loop routes a public alias to its explicit upstream model on every round", async () => {
   const requests = [];
   const upstream = {

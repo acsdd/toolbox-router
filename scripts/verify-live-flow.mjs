@@ -14,7 +14,7 @@ const home=await mkdtemp(join(parent,"live-flow-"));
 let bridge,server;
 const logger={info(){},error(){}};
 try {
-  const config=parseConfig({ ...process.env, TOOLBOX_ROUTER_HOST:"127.0.0.1", TOOLBOX_ROUTER_MODE:"bridge", TOOLBOX_ROUTER_MCP_RUNTIME:"source", TOOLBOX_ROUTER_MCP_COMMAND:process.execPath, TOOLBOX_ROUTER_MCP_ARGS:JSON.stringify([resolve(root,"../toolbox-mcp/dist/index.js")]), TOOLBOX_ROUTER_MCP_CWD:resolve(root,"../toolbox-mcp"), TOOLBOX_ROUTER_MCP_HOME:home });
+  const config=parseConfig({ ...process.env, TOOLBOX_ROUTER_API_KEY:"synthetic-live-check-key", TOOLBOX_ROUTER_HOST:"127.0.0.1", TOOLBOX_ROUTER_MODE:"bridge", TOOLBOX_ROUTER_MCP_RUNTIME:"source", TOOLBOX_ROUTER_MCP_COMMAND:process.execPath, TOOLBOX_ROUTER_MCP_ARGS:JSON.stringify([resolve(root,"../toolbox-mcp/dist/index.js")]), TOOLBOX_ROUTER_MCP_CWD:resolve(root,"../toolbox-mcp"), TOOLBOX_ROUTER_MCP_HOME:home });
   bridge=new ToolboxMcpBridge({config,logger});await bridge.start();
   if(!bridge.registry.has("crypto_status"))throw new Error("The test tool was not discovered.");
   const upstream=createUpstreamClient({...config.upstream,logger});

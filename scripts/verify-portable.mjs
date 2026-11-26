@@ -7,7 +7,9 @@ import { fileURLToPath } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
 import { resolveUpstreamCredential } from '../src/upstream-credential.mjs'
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'..')
-const bundle=join(root,'dist','portable-preview'),parent=join(root,'test-mcp')
+const bundleIndex=process.argv.indexOf('--bundle')
+if(bundleIndex>=0 && !process.argv[bundleIndex+1])throw new Error('--bundle needs a directory path.')
+const bundle=bundleIndex>=0?resolve(process.argv[bundleIndex+1]):join(root,'dist','portable-preview'),parent=join(root,'test-mcp')
 await mkdir(parent,{recursive:true});const home=await mkdtemp(join(parent,'portable-check-'))
 const listener=createServer();await new Promise((ok,fail)=>{listener.once('error',fail);listener.listen(0,'127.0.0.1',ok)})
 const port=listener.address().port;await new Promise(ok=>listener.close(ok))

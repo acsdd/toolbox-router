@@ -31,9 +31,11 @@ function normalizeToolCalls(message, round) {
     const name = toolName(call);
     if (!name) throw new ChatLoopError("Upstream returned a tool call without a function name", 502, "invalid_tool_call");
     return {
+      ...call,
       id: typeof call.id === "string" && call.id ? call.id : `call_${round}_${index}`,
       type: "function",
       function: {
+        ...call.function,
         name,
         arguments:
           typeof call.function.arguments === "string"

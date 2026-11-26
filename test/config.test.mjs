@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseConfig } from "../src/config.mjs";
+import { assertSecureRouterKey, parseConfig } from "../src/config.mjs";
 
 test("parseConfig defaults to a local-only spike address", () => {
   const config = parseConfig({});
@@ -31,6 +31,13 @@ test("non-loopback binding requires a non-default strong key", () => {
   assert.throws(() => parseConfig({ TOOLBOX_ROUTER_HOST: "0.0.0.0" }), /explicit API key/);
   assert.throws(() => parseConfig({ TOOLBOX_ROUTER_HOST: "192.168.1.2", TOOLBOX_ROUTER_API_KEY: "short-key" }), /explicit API key/);
   assert.equal(parseConfig({ TOOLBOX_ROUTER_HOST: "192.168.1.2", TOOLBOX_ROUTER_API_KEY: "example-test-key-123" }).host, "192.168.1.2");
+});
+
+test("live bridge refuses the public preview key but mock remains available", () => {
+  assert.doesNotThrow(() => assertSecureRouterKey({mode:"mock",apiKey:"toolbox-spike-key"}));
+  assert.throws(() => assertSecureRouterKey({mode:"bridge",apiKey:"toolbox-spike-key"}), /unique Router API key/);
+  assert.throws(() => assertSecureRouterKey({mode:"bridge",apiKey:"short-key"}), /unique Router API key/);
+  assert.doesNotThrow(() => assertSecureRouterKey({mode:"bridge",apiKey:"synthetic-strong-key"}));
 });
 
 test("parseConfig rejects an invalid port instead of silently changing it", () => {
@@ -116,15 +123,13 @@ test("parseConfig rejects unsupported MCP runtimes and malformed argument arrays
   );
 });
 
-test("parseConfig rejects C drive paths for router-owned data and models", () => {
-  assert.throws(
-    () => parseConfig({ TOOLBOX_ROUTER_DATA_DIR: "C:/RouterData" }),
-    /DATA_DIR must be an absolute path on D:/,
-  );
-  assert.throws(
-    () => parseConfig({ TOOLBOX_ROUTER_MCP_HOME: "C:/RouterHome" }),
-    /MCP_HOME must be an absolute path on D:/,
-  );
+test("router data can live on another local drive while model storage stays on D", () => {
+  const config = parseConfig({ TOOLBOX_ROUTER_DATA_DIR: "C:/RouterData", TOOLBOX_ROUTER_MCP_HOME: "C:/RouterHome" });
+  assert.equal(config.dataDir, "C:/RouterData");
+  assert.equal(config.mcpHome, "C:/RouterHome");
+  assert.equal(parseConfig({ TOOLBOX_ROUTER_DATA_DIR: "C:/" }).dataDir, "C:/");
+  assert.throws(() => parseConfig({ TOOLBOX_ROUTER_DATA_DIR: "relative" }), /absolute local drive path/);
+  assert.throws(() => parseConfig({ TOOLBOX_ROUTER_MCP_HOME: "//server/share" }), /absolute local drive path/);
   assert.throws(
     () => parseConfig({ TOOLBOX_ROUTER_MODEL_ROOT: "C:/Models" }),
     /MODEL_ROOT must be an absolute path on D:/,
@@ -177,7 +182,7 @@ test("parseConfig points bridge mode at the LAN gateway with a tool capable upst
   });
 
   assert.equal(config.upstream.baseUrl, "http://127.0.0.1:7770/v1");
-  assert.equal(config.upstream.model, "claude-sonnet-4-6");
+  assert.equal(config.upstream.model, "gemini-3.8-flash-low");
   assert.equal(config.upstream.apiKeySource, "environment");
 });
 
@@ -188,7 +193,7 @@ test("parseConfig publishes an explicit router owned model catalog in bridge mod
   });
 
   assert.deepEqual(config.models, [
-    { id: "toolbox-spike", upstreamModel: "claude-sonnet-4-6", requiredBytes: 0 },
+    { id: "toolbox-spike", upstreamModel: "gemini-3.8-flash-low", requiredBytes: 0 },
     { id: "toolbox-spike-fast", upstreamModel: "gpt-oss-120b-medium", requiredBytes: 0 },
   ]);
 });

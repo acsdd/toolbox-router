@@ -376,7 +376,8 @@ test("an available alias routes to its explicit upstream model and keeps the pub
 
       assert.equal(response.status, 200);
       assert.equal(body.model, "local-alias");
-      assert.deepEqual(requests[0].options, { model: "explicit-local-model" });
+      assert.equal(requests[0].options.model, "explicit-local-model");
+      assert.equal(requests[0].options.signal.aborted, false);
     },
   );
 });
@@ -417,4 +418,63 @@ test("bridge maps upstream failures to safe OpenAI errors and logs", async () =>
   assert.doesNotMatch(logs, /upstream-test-key/);
   assert.doesNotMatch(logs, /private-user-prompt/);
   assert.doesNotMatch(logs, /rate limited/);
+});
+
+test("provider payment errors offer safe recovery guidance", async () => {
+  await withRouter({ bridge: readyBridge(), upstream: {
+    async complete() { throw new UpstreamError("private upstream body", 402, "upstream_http_error"); },
+  } }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: "POST", headers: headers(),
+      body: JSON.stringify({ model: "toolbox-spike", messages: [{ role: "user", content: "test" }] }),
+    });
+    const body = await response.json();
+    assert.equal(response.status, 402);
+    assert.match(body.error.message, /provider account or select another available model/i);
+    assert.doesNotMatch(body.error.message, /private upstream body/);
+  });
+});
+
+test("disconnecting the client cancels an in-flight upstream request", async () => {
+  let started;
+  const upstreamStarted = new Promise((resolve) => { started = resolve; });
+  let cancelled;
+  const upstreamCancelled = new Promise((resolve) => { cancelled = resolve; });
+  await withRouter({ bridge: readyBridge(), upstream: {
+    async complete(_payload, { signal }) {
+      started();
+      await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+      cancelled();
+      throw new Error("cancelled");
+    },
+  } }, async (baseUrl) => {
+    const controller = new AbortController();
+    const pending = fetch(`${baseUrl}/v1/chat/completions`, {
+      method: "POST", headers: headers(), signal: controller.signal,
+      body: JSON.stringify({ model: "toolbox-spike", messages: [{ role: "user", content: "hello" }] }),
+    }).catch(() => undefined);
+    await upstreamStarted;
+    controller.abort();
+    await Promise.race([upstreamCancelled, new Promise((_, reject) => setTimeout(() => reject(new Error("upstream cancellation timed out")), 3000))]);
+    await pending;
+  });
+});
+
+test("request logs never include caller-supplied tool-choice contents", async () => {
+  const entries = [];
+  await withRouter({ bridge: readyBridge(), upstream: { async complete() { return completion({ role: "assistant", content: "ok" }); } }, logger: { info: line => entries.push(line), error: line => entries.push(line) } }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: "POST", headers: headers(),
+      body: JSON.stringify({ model: "toolbox-spike", messages: [{ role: "user", content: "hello" }], tool_choice: { type: "function", private: "SYNTHETIC-PRIVATE-DATA" } }),
+    });
+    assert.equal(response.status, 200);
+  });
+  assert.doesNotMatch(entries.join("\n"), /SYNTHETIC-PRIVATE-DATA/);
+});
+test("unreachable upstream returns a gateway error", async () => {
+  await withRouter({ bridge: readyBridge(), upstream: { async complete() { throw new UpstreamError("connection failed", 0, "upstream_network_error"); } }, logger: { info() {}, error() {} } }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/v1/chat/completions`, { method: "POST", headers: headers(), body: JSON.stringify({ model: "toolbox-spike", messages: [{ role: "user", content: "hello" }] }) });
+    assert.equal(response.status, 502);
+    assert.equal((await response.json()).error.code, "upstream_network_error");
+  });
 });

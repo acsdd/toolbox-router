@@ -7,7 +7,8 @@ import { dirname, join, resolve, win32 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
-import { parseConfig } from "../src/config.mjs";
+import { assertSecureRouterKey, parseConfig } from "../src/config.mjs";
+import { readQoderRouterKey } from "../src/router-credential.mjs";
 
 const SERVER_PATH = fileURLToPath(new URL("../src/server.mjs", import.meta.url));
 const DEFAULT_TOOLBOX_SOURCE = "D:/Projects/Toolbox/toolbox-mcp";
@@ -425,7 +426,13 @@ async function waitForHealth(baseUrl, child, timeoutMs = 10_000) {
 }
 
 async function main() {
-  const config = parseConfig();
+  const env = { ...process.env };
+  if ((env.TOOLBOX_ROUTER_MODE || "mock").toLowerCase() === "bridge" && !env.TOOLBOX_ROUTER_API_KEY?.trim()) {
+    const key = readQoderRouterKey(env);
+    if (key) env.TOOLBOX_ROUTER_API_KEY = key;
+  }
+  const config = parseConfig(env);
+  assertSecureRouterKey(config);
 
   if (!config.logFile) {
     const timestamp = new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-");

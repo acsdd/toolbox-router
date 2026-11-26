@@ -9,8 +9,15 @@ const DEFAULT_DATA_DIR = "D:/Projects/toolbox/toolbox-router";
 const DEFAULT_MODEL_ROOT = "D:/LMStudio_Downloads";
 const DEFAULT_MIN_FREE_BYTES = 5 * 1024 ** 3;
 const DEFAULT_UPSTREAM_BASE_URL = "http://127.0.0.1:7770/v1";
-const DEFAULT_UPSTREAM_MODEL = "claude-sonnet-4-6";
+const DEFAULT_UPSTREAM_MODEL = "gemini-3.8-flash-low";
 const FALLBACK_UPSTREAM_MODEL = "gpt-oss-120b-medium";
+
+/** The public spike key is accepted only by mock mode, never by a live bridge. */
+export function assertSecureRouterKey(config) {
+  if (config.mode === "bridge" && (config.apiKey === DEFAULT_API_KEY || config.apiKey.length < 16)) {
+    throw new Error("Bridge mode requires a unique Router API key of at least 16 characters. Run the Qoder setup or set TOOLBOX_ROUTER_API_KEY.");
+  }
+}
 
 function readInteger(env, name, fallback, min, max) {
   const raw = env[name]?.trim() || String(fallback);
@@ -33,10 +40,19 @@ function normalizeDPath(value, name) {
   return trimmed.replaceAll("\\", "/").replace(/\/+$/, "");
 }
 
+function normalizeLocalPath(value, name) {
+  const trimmed = value.trim();
+  if (!win32.isAbsolute(trimmed) || !/^[a-z]:[\\/]/i.test(trimmed)) {
+    throw new Error(`${name} must be an absolute local drive path`);
+  }
+  const normalized = trimmed.replaceAll("\\", "/").replace(/\/+$/, "");
+  return /^[a-z]:$/i.test(normalized) ? `${normalized}/` : normalized;
+}
+
 function normalizeLogPath(value) {
   const trimmed = value.trim();
-  if (win32.isAbsolute(trimmed) && !/^d:[\\/]/i.test(trimmed)) {
-    throw new Error("TOOLBOX_ROUTER_LOG_FILE must be an absolute path on D: drive or relative to TOOLBOX_ROUTER_DATA_DIR");
+  if (win32.isAbsolute(trimmed) && !/^[a-z]:[\\/]/i.test(trimmed)) {
+    throw new Error("TOOLBOX_ROUTER_LOG_FILE must be an absolute local drive path or relative to TOOLBOX_ROUTER_DATA_DIR");
   }
   return trimmed.replaceAll("\\", "/");
 }
@@ -126,9 +142,9 @@ export function parseConfig(env = process.env) {
   const rawPort = env.TOOLBOX_ROUTER_PORT?.trim() || String(DEFAULT_PORT);
   const apiKey = env.TOOLBOX_ROUTER_API_KEY?.trim() || DEFAULT_API_KEY;
   const mode = (env.TOOLBOX_ROUTER_MODE?.trim() || "mock").toLowerCase();
-  const dataDir = normalizeDPath(env.TOOLBOX_ROUTER_DATA_DIR?.trim() || DEFAULT_DATA_DIR, "TOOLBOX_ROUTER_DATA_DIR");
+  const dataDir = normalizeLocalPath(env.TOOLBOX_ROUTER_DATA_DIR?.trim() || DEFAULT_DATA_DIR, "TOOLBOX_ROUTER_DATA_DIR");
   const modelRoot = normalizeDPath(env.TOOLBOX_ROUTER_MODEL_ROOT?.trim() || DEFAULT_MODEL_ROOT, "TOOLBOX_ROUTER_MODEL_ROOT");
-  const mcpHome = normalizeDPath(env.TOOLBOX_ROUTER_MCP_HOME?.trim() || `${dataDir}/mcp-home`, "TOOLBOX_ROUTER_MCP_HOME");
+  const mcpHome = normalizeLocalPath(env.TOOLBOX_ROUTER_MCP_HOME?.trim() || `${dataDir}/mcp-home`, "TOOLBOX_ROUTER_MCP_HOME");
   const logFile = normalizeLogPath(env.TOOLBOX_ROUTER_LOG_FILE?.trim() || `${dataDir}/logs/router.jsonl`);
   const capacityDrive = (env.TOOLBOX_ROUTER_CAPACITY_DRIVE?.trim() || "D:").toUpperCase();
   const mcpRuntime = (env.TOOLBOX_ROUTER_MCP_RUNTIME?.trim() || "source").toLowerCase();
