@@ -1,6 +1,15 @@
+/live-policy/
+/logs/
+/mcp-home/
+/portable-home/
+/portable-temp/
+/test-lifecycle/
+/test-mcp/
+
 node_modules/
 logs/*
 .local/
 .env
 .env.*
 *.log
+/dist/

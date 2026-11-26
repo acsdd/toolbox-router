@@ -9,7 +9,7 @@ import { ToolboxMcpBridge } from "../src/mcp-bridge.mjs";
 
 const FAKE_SERVER = fileURLToPath(new URL("./fixtures/fake-mcp-server.mjs", import.meta.url));
 const NOISY_SERVER = fileURLToPath(new URL("./fixtures/noisy-mcp-server.mjs", import.meta.url));
-const TEST_ROOT = "D:/Projects/ToolboxRouter/test-mcp";
+const TEST_ROOT = "D:/Projects/toolbox/toolbox-router/test-mcp";
 const cleanup = [];
 
 const silentLogger = { info() {}, error() {} };
@@ -54,7 +54,7 @@ test("MCP bridge starts a real stdio child and filters its discovered tool surfa
   assert.equal(names.includes("gmail_connect"), false);
   assert.equal(names.includes("remote_dynamic_shell"), false);
   assert.equal(bridge.status().toolCount, 3);
-  assert.match(bridge.status().home, /^D:\/Projects\/ToolboxRouter\/test-mcp\//);
+  assert.match(bridge.status().home, /^D:\/Projects\/toolbox\/toolbox-router\/test-mcp\//);
 });
 
 test("MCP bridge creates an isolated home and passes a disabled ops-panel port", async () => {
@@ -193,7 +193,7 @@ test("MCP bridge reports startup failure instead of pretending to be ready", asy
     TOOLBOX_ROUTER_UPSTREAM_BASE_URL: "http://localhost:7770/v1",
     TOOLBOX_ROUTER_UPSTREAM_API_KEY: "upstream-test-key",
     TOOLBOX_ROUTER_UPSTREAM_MODEL: "test-model",
-    TOOLBOX_ROUTER_MCP_COMMAND: "D:/Projects/ToolboxRouter/missing-node.exe",
+    TOOLBOX_ROUTER_MCP_COMMAND: "D:/Projects/toolbox/toolbox-router/missing-node.exe",
     TOOLBOX_ROUTER_MCP_ARGS: JSON.stringify([FAKE_SERVER]),
     TOOLBOX_ROUTER_MCP_HOME: home,
   });

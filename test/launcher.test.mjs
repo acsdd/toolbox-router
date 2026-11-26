@@ -81,7 +81,7 @@ test("buildChildEnv passes every explicit router parameter", () => {
   assert.equal(childEnv.TOOLBOX_ROUTER_PORT, "8787");
   assert.equal(childEnv.TOOLBOX_ROUTER_API_KEY, "launcher-test-key");
   assert.equal(childEnv.TOOLBOX_ROUTER_MODE, "mock");
-  assert.equal(childEnv.TOOLBOX_ROUTER_LOG_FILE, "D:/Projects/ToolboxRouter/logs/test.jsonl");
+  assert.equal(childEnv.TOOLBOX_ROUTER_LOG_FILE, "D:/Projects/toolbox/toolbox-router/logs/test.jsonl");
 });
 
 test("buildChildEnv forwards bridge upstream MCP capacity and model settings", () => {
@@ -131,6 +131,16 @@ test("runtime resolution verifies source and installed entry points", () => {
   assert.equal(installed.command, "D:/Programs/Model Farm/Model Farm.exe");
   assert.deepEqual(installed.args, ["D:/Programs/Model Farm/resources/app.asar/dist/index.js"]);
   assert.equal(installed.runtime, "installed");
+});
+
+test("source runtime can use the bundled MCP directory", async () => {
+  const config = parseConfig({ TOOLBOX_ROUTER_MCP_RUNTIME: "source" });
+  const runtime = await prepareMcpRuntime(config, {
+    env: { TOOLBOX_ROUTER_MCP_SOURCE_ROOT: "D:/bundle/mcp" },
+    existsSync: path => path === "D:/bundle/mcp/dist/index.js",
+  });
+  assert.deepEqual(runtime.args, ["D:/bundle/mcp/dist/index.js"]);
+  assert.equal(runtime.command, process.execPath);
 });
 
 test("portable discovery only accepts a newly extracted runtime with its asar archive", async () => {
@@ -247,17 +257,17 @@ test("portable preparation defaults extraction and temp paths beneath the D-driv
       discoveredTempRoot = tempRoot;
       return {
         runtime: "portable",
-        command: "D:/Projects/ToolboxRouter/portable-temp/extracted/Model Farm.exe",
-        args: ["D:/Projects/ToolboxRouter/portable-temp/extracted/resources/app.asar/dist/index.js"],
-        cwd: "D:/Projects/ToolboxRouter/portable-temp/extracted",
-        extractDir: "D:/Projects/ToolboxRouter/portable-temp/extracted",
+        command: "D:/Projects/toolbox/toolbox-router/portable-temp/extracted/Model Farm.exe",
+        args: ["D:/Projects/toolbox/toolbox-router/portable-temp/extracted/resources/app.asar/dist/index.js"],
+        cwd: "D:/Projects/toolbox/toolbox-router/portable-temp/extracted",
+        extractDir: "D:/Projects/toolbox/toolbox-router/portable-temp/extracted",
       };
     },
   });
 
-  assert.equal(discoveredTempRoot, "D:/Projects/ToolboxRouter/portable-temp");
-  assert.equal(spawnOptions.env.TEMP, "D:/Projects/ToolboxRouter/portable-temp");
-  assert.equal(spawnOptions.env.TMP, "D:/Projects/ToolboxRouter/portable-temp");
+  assert.equal(discoveredTempRoot, "D:/Projects/toolbox/toolbox-router/portable-temp");
+  assert.equal(spawnOptions.env.TEMP, "D:/Projects/toolbox/toolbox-router/portable-temp");
+  assert.equal(spawnOptions.env.TMP, "D:/Projects/toolbox/toolbox-router/portable-temp");
   assert.equal(spawnOptions.env.PATH, "kept-path");
   assert.equal(prepared.gui, gui);
   await stopLaunchedProcess(gui, 100);
@@ -265,8 +275,8 @@ test("portable preparation defaults extraction and temp paths beneath the D-driv
 
 test("relative launcher logs resolve under the D-drive data directory", () => {
   const config = parseConfig({ TOOLBOX_ROUTER_LOG_FILE: "logs/test.jsonl" });
-  assert.equal(resolveLogPath(config), "D:/Projects/ToolboxRouter/logs/test.jsonl");
-  assert.equal(resolveLogPath(parseConfig({})), "D:/Projects/ToolboxRouter/logs/router.jsonl");
+  assert.equal(resolveLogPath(config), "D:/Projects/toolbox/toolbox-router/logs/test.jsonl");
+  assert.equal(resolveLogPath(parseConfig({})), "D:/Projects/toolbox/toolbox-router/logs/router.jsonl");
 });
 
 test("runSmokeChecks exercises models text streaming and tool calls", async () => {

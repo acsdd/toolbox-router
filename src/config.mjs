@@ -1,11 +1,16 @@
 import { win32 } from "node:path";
 
-const DEFAULT_HOST = "192.168.100.66";
+import { resolveUpstreamCredential } from "./upstream-credential.mjs";
+
+const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 18787;
 const DEFAULT_API_KEY = "toolbox-spike-key";
-const DEFAULT_DATA_DIR = "D:/Projects/ToolboxRouter";
+const DEFAULT_DATA_DIR = "D:/Projects/toolbox/toolbox-router";
 const DEFAULT_MODEL_ROOT = "D:/LMStudio_Downloads";
 const DEFAULT_MIN_FREE_BYTES = 5 * 1024 ** 3;
+const DEFAULT_UPSTREAM_BASE_URL = "http://127.0.0.1:7770/v1";
+const DEFAULT_UPSTREAM_MODEL = "claude-sonnet-4-6";
+const FALLBACK_UPSTREAM_MODEL = "gpt-oss-120b-medium";
 
 function readInteger(env, name, fallback, min, max) {
   const raw = env[name]?.trim() || String(fallback);
@@ -72,9 +77,16 @@ function normalizeBaseUrl(raw, required) {
   return value;
 }
 
-function parseModelCatalog(raw, defaultUpstreamModel) {
+function parseModelCatalog(raw, defaultUpstreamModel, bridgeMode) {
   if (!raw?.trim()) {
-    return [{ id: "toolbox-spike", upstreamModel: defaultUpstreamModel || "mock", requiredBytes: 0 }];
+    if (!bridgeMode) {
+      return [{ id: "toolbox-spike", upstreamModel: defaultUpstreamModel || "mock", requiredBytes: 0 }];
+    }
+
+    return [
+      { id: "toolbox-spike", upstreamModel: defaultUpstreamModel, requiredBytes: 0 },
+      { id: "toolbox-spike-fast", upstreamModel: FALLBACK_UPSTREAM_MODEL, requiredBytes: 0 },
+    ];
   }
 
   let value;
@@ -133,6 +145,10 @@ export function parseConfig(env = process.env) {
   if (apiKey.length < 8) {
     throw new Error("TOOLBOX_ROUTER_API_KEY must contain at least 8 characters");
   }
+  if (!['127.0.0.1', 'localhost', '::1'].includes(host.toLowerCase()) &&
+      (apiKey === DEFAULT_API_KEY || apiKey.length < 16)) {
+    throw new Error("A non-loopback Router requires an explicit API key of at least 16 characters.");
+  }
 
   if (!['mock', 'bridge'].includes(mode)) {
     throw new Error(`Unsupported TOOLBOX_ROUTER_MODE: ${mode}`);
@@ -146,10 +162,20 @@ export function parseConfig(env = process.env) {
     throw new Error(`Unsupported TOOLBOX_ROUTER_MCP_RUNTIME: ${mcpRuntime}`);
   }
 
+  const credential = mode === "bridge"
+    ? resolveUpstreamCredential(env)
+    : { apiKey: "", source: "none" };
   const upstream = {
-    baseUrl: normalizeBaseUrl(env.TOOLBOX_ROUTER_UPSTREAM_BASE_URL?.trim() || "", mode === "bridge"),
-    apiKey: env.TOOLBOX_ROUTER_UPSTREAM_API_KEY?.trim() || "",
-    model: env.TOOLBOX_ROUTER_UPSTREAM_MODEL?.trim() || "",
+    baseUrl: normalizeBaseUrl(
+      env.TOOLBOX_ROUTER_UPSTREAM_BASE_URL?.trim() ||
+        (mode === "bridge" ? DEFAULT_UPSTREAM_BASE_URL : ""),
+      mode === "bridge",
+    ),
+    apiKey: credential.apiKey,
+    apiKeySource: credential.source,
+    model:
+      env.TOOLBOX_ROUTER_UPSTREAM_MODEL?.trim() ||
+      (mode === "bridge" ? DEFAULT_UPSTREAM_MODEL : ""),
     timeoutMs: readInteger(env, "TOOLBOX_ROUTER_UPSTREAM_TIMEOUT_MS", 120_000, 1_000, 600_000),
   };
 
@@ -181,7 +207,7 @@ export function parseConfig(env = process.env) {
     capacityDrive,
     minFreeBytes: readInteger(env, "TOOLBOX_ROUTER_MIN_FREE_BYTES", DEFAULT_MIN_FREE_BYTES, 0, 1024 ** 4),
     logFile,
-    models: parseModelCatalog(env.TOOLBOX_ROUTER_MODELS, upstream.model),
+    models: parseModelCatalog(env.TOOLBOX_ROUTER_MODELS, upstream.model, mode === "bridge"),
     upstream,
     mcp,
     limits: {

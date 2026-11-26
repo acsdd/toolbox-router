@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 const SERVER = fileURLToPath(new URL("../src/server.mjs", import.meta.url));
 const FAKE_MCP = fileURLToPath(new URL("./fixtures/fake-mcp-server.mjs", import.meta.url));
 const STALLED_MCP = fileURLToPath(new URL("./fixtures/stalled-mcp-server.mjs", import.meta.url));
-const TEST_ROOT = "D:/Projects/ToolboxRouter/test-lifecycle";
+const TEST_ROOT = "D:/Projects/toolbox/toolbox-router/test-lifecycle";
 
 async function reservePort() {
   return new Promise((resolve, reject) => {

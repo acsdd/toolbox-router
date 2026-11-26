@@ -3,10 +3,10 @@ import test from "node:test";
 
 import { parseConfig } from "../src/config.mjs";
 
-test("parseConfig defaults to the requested LAN spike address", () => {
+test("parseConfig defaults to a local-only spike address", () => {
   const config = parseConfig({});
 
-  assert.equal(config.host, "192.168.100.66");
+  assert.equal(config.host, "127.0.0.1");
   assert.equal(config.port, 18787);
   assert.equal(config.mode, "mock");
   assert.ok(config.apiKey.length >= 8);
@@ -27,6 +27,12 @@ test("parseConfig applies explicit environment overrides", () => {
   assert.equal(config.logFile, "logs/custom.jsonl");
 });
 
+test("non-loopback binding requires a non-default strong key", () => {
+  assert.throws(() => parseConfig({ TOOLBOX_ROUTER_HOST: "0.0.0.0" }), /explicit API key/);
+  assert.throws(() => parseConfig({ TOOLBOX_ROUTER_HOST: "192.168.1.2", TOOLBOX_ROUTER_API_KEY: "short-key" }), /explicit API key/);
+  assert.equal(parseConfig({ TOOLBOX_ROUTER_HOST: "192.168.1.2", TOOLBOX_ROUTER_API_KEY: "example-test-key-123" }).host, "192.168.1.2");
+});
+
 test("parseConfig rejects an invalid port instead of silently changing it", () => {
   assert.throws(
     () => parseConfig({ TOOLBOX_ROUTER_PORT: "70000" }),
@@ -37,12 +43,12 @@ test("parseConfig rejects an invalid port instead of silently changing it", () =
 test("parseConfig keeps runtime data and model capacity on D drive", () => {
   const config = parseConfig({});
 
-  assert.equal(config.dataDir, "D:/Projects/ToolboxRouter");
-  assert.equal(config.mcpHome, "D:/Projects/ToolboxRouter/mcp-home");
+  assert.equal(config.dataDir, "D:/Projects/toolbox/toolbox-router");
+  assert.equal(config.mcpHome, "D:/Projects/toolbox/toolbox-router/mcp-home");
   assert.equal(config.modelRoot, "D:/LMStudio_Downloads");
   assert.equal(config.capacityDrive, "D:");
   assert.equal(config.minFreeBytes, 5 * 1024 ** 3);
-  assert.equal(config.logFile, "D:/Projects/ToolboxRouter/logs/router.jsonl");
+  assert.equal(config.logFile, "D:/Projects/toolbox/toolbox-router/logs/router.jsonl");
   assert.equal(config.limits.maxModelRounds, 6);
   assert.equal(config.limits.maxToolCallsPerRound, 4);
 });
@@ -58,7 +64,7 @@ test("parseConfig accepts explicit bridge upstream and MCP settings", () => {
     TOOLBOX_ROUTER_MCP_COMMAND: "D:/Projects/Toolbox/runtime/Model Farm.exe",
     TOOLBOX_ROUTER_MCP_ARGS: '["D:/Projects/Toolbox/runtime/resources/app.asar/dist/index.js"]',
     TOOLBOX_ROUTER_MCP_CWD: "D:/Projects/Toolbox/runtime",
-    TOOLBOX_ROUTER_MCP_HOME: "D:/Projects/ToolboxRouter/custom-home",
+    TOOLBOX_ROUTER_MCP_HOME: "D:/Projects/toolbox/toolbox-router/custom-home",
     TOOLBOX_ROUTER_MCP_STARTUP_TIMEOUT_MS: "20000",
     TOOLBOX_ROUTER_MCP_CALL_TIMEOUT_MS: "9000",
     TOOLBOX_ROUTER_MCP_MAX_RESULT_BYTES: "2048",
@@ -77,7 +83,7 @@ test("parseConfig accepts explicit bridge upstream and MCP settings", () => {
     "D:/Projects/Toolbox/runtime/resources/app.asar/dist/index.js",
   ]);
   assert.equal(config.mcp.cwd, "D:/Projects/Toolbox/runtime");
-  assert.equal(config.mcp.home, "D:/Projects/ToolboxRouter/custom-home");
+  assert.equal(config.mcp.home, "D:/Projects/toolbox/toolbox-router/custom-home");
   assert.equal(config.mcp.startupTimeoutMs, 20000);
   assert.equal(config.mcp.callTimeoutMs, 9000);
   assert.equal(config.mcp.maxResultBytes, 2048);
@@ -86,23 +92,13 @@ test("parseConfig accepts explicit bridge upstream and MCP settings", () => {
   assert.equal(config.minFreeBytes, 1234);
 });
 
-test("parseConfig requires every upstream setting in bridge mode", () => {
-  const required = [
-    ["TOOLBOX_ROUTER_UPSTREAM_BASE_URL", /UPSTREAM_BASE_URL/],
-    ["TOOLBOX_ROUTER_UPSTREAM_API_KEY", /UPSTREAM_API_KEY/],
-    ["TOOLBOX_ROUTER_UPSTREAM_MODEL", /UPSTREAM_MODEL/],
-  ];
+test("parseConfig requires an upstream credential in bridge mode", () => {
+  const env = {
+    TOOLBOX_ROUTER_MODE: "bridge",
+    TOOLBOX_ROUTER_QODER_SETTINGS: "D:/Config/missing-settings.json",
+  };
 
-  for (const [name, pattern] of required) {
-    const env = {
-      TOOLBOX_ROUTER_MODE: "bridge",
-      TOOLBOX_ROUTER_UPSTREAM_BASE_URL: "http://localhost:7770/v1",
-      TOOLBOX_ROUTER_UPSTREAM_API_KEY: "upstream-test-key",
-      TOOLBOX_ROUTER_UPSTREAM_MODEL: "grok-4.7",
-    };
-    delete env[name];
-    assert.throws(() => parseConfig(env), pattern);
-  }
+  assert.throws(() => parseConfig(env), /UPSTREAM_API_KEY/);
 });
 
 test("parseConfig rejects unsupported MCP runtimes and malformed argument arrays", () => {
@@ -158,16 +154,42 @@ test("parseConfig enforces safe bridge loop and timeout bounds", () => {
   );
 });
 
-test("parseConfig defaults to one explicit upstream alias without inheriting a catalog", () => {
+test("parseConfig keeps a caller supplied model catalog unchanged", () => {
   const config = parseConfig({
     TOOLBOX_ROUTER_MODE: "bridge",
     TOOLBOX_ROUTER_UPSTREAM_BASE_URL: "http://localhost:7770/v1",
     TOOLBOX_ROUTER_UPSTREAM_API_KEY: "upstream-test-key",
     TOOLBOX_ROUTER_UPSTREAM_MODEL: "grok-4.7",
+    TOOLBOX_ROUTER_MODELS: JSON.stringify([
+      { id: "toolbox-spike", upstreamModel: "grok-4.7" },
+    ]),
   });
 
   assert.deepEqual(config.models, [
     { id: "toolbox-spike", upstreamModel: "grok-4.7", requiredBytes: 0 },
+  ]);
+});
+
+test("parseConfig points bridge mode at the LAN gateway with a tool capable upstream", () => {
+  const config = parseConfig({
+    TOOLBOX_ROUTER_MODE: "bridge",
+    TOOLBOX_ROUTER_UPSTREAM_API_KEY: "upstream-test-key",
+  });
+
+  assert.equal(config.upstream.baseUrl, "http://127.0.0.1:7770/v1");
+  assert.equal(config.upstream.model, "claude-sonnet-4-6");
+  assert.equal(config.upstream.apiKeySource, "environment");
+});
+
+test("parseConfig publishes an explicit router owned model catalog in bridge mode", () => {
+  const config = parseConfig({
+    TOOLBOX_ROUTER_MODE: "bridge",
+    TOOLBOX_ROUTER_UPSTREAM_API_KEY: "upstream-test-key",
+  });
+
+  assert.deepEqual(config.models, [
+    { id: "toolbox-spike", upstreamModel: "claude-sonnet-4-6", requiredBytes: 0 },
+    { id: "toolbox-spike-fast", upstreamModel: "gpt-oss-120b-medium", requiredBytes: 0 },
   ]);
 });
 

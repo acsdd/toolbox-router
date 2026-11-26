@@ -70,7 +70,7 @@ function readyBridge() {
         function: { name: "system_stats", description: "System stats", parameters: { type: "object", properties: {} } },
       },
     ],
-    status: () => ({ ready: true, toolCount: 1, runtime: "source", pid: 123, home: "D:/Projects/ToolboxRouter/mcp-home" }),
+    status: () => ({ ready: true, toolCount: 1, runtime: "source", pid: 123, home: "D:/Projects/toolbox/toolbox-router/mcp-home" }),
     async callTool() {
       return { isError: false, content: '{"cpu":12}' };
     },

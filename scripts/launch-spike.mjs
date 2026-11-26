@@ -12,7 +12,7 @@ import { parseConfig } from "../src/config.mjs";
 const SERVER_PATH = fileURLToPath(new URL("../src/server.mjs", import.meta.url));
 const DEFAULT_TOOLBOX_SOURCE = "D:/Projects/Toolbox/toolbox-mcp";
 const DEFAULT_PORTABLE_EXE = "D:/Projects/Toolbox/toolbox-mcp/dist/ModelFarm-Portable-0.9.25.exe";
-const DEFAULT_PORTABLE_TEMP = "D:/Projects/ToolboxRouter/portable-temp";
+const DEFAULT_PORTABLE_TEMP = "D:/Projects/toolbox/toolbox-router/portable-temp";
 
 function normalizePath(path) {
   return path.replaceAll("\\", "/").replace(/\/+$/, "");
@@ -189,7 +189,7 @@ export async function prepareMcpRuntime(
   {
     env = process.env,
     tempRoot = normalizePath(join(config.dataDir, "portable-temp")),
-    sourceRoot = DEFAULT_TOOLBOX_SOURCE,
+    sourceRoot = env.TOOLBOX_ROUTER_MCP_SOURCE_ROOT?.trim() || DEFAULT_TOOLBOX_SOURCE,
     portableExe = DEFAULT_PORTABLE_EXE,
     spawnImpl = spawn,
     readdirImpl = readdir,
@@ -427,22 +427,16 @@ async function waitForHealth(baseUrl, child, timeoutMs = 10_000) {
 async function main() {
   const config = parseConfig();
 
-  if (["127.0.0.1", "::1", "localhost"].includes(config.host.toLowerCase())) {
-    throw new Error("Use the assigned LAN address (192.168.100.66), not a loopback address");
-  }
-
   if (!config.logFile) {
     const timestamp = new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-");
     config.logFile = `logs/spike-${timestamp}.jsonl`;
   }
   config.logFile = resolveLogPath(config);
 
-  const adapter = findIPv4Address(config.host);
-  if (!adapter) {
-    throw new Error(`${config.host} is not assigned to an active IPv4 network adapter`);
-  }
-
-  console.log(`[launcher] Using ${adapter.name}: ${config.host}/${adapter.netmask}`);
+  const local = ["127.0.0.1", "::1", "localhost"].includes(config.host.toLowerCase());
+  const adapter = local ? null : findIPv4Address(config.host);
+  if (!local && !adapter) throw new Error(`${config.host} is not assigned to an active IPv4 network adapter`);
+  console.log(local ? `[launcher] Using local address ${config.host}` : `[launcher] Using ${adapter.name}: ${config.host}/${adapter.netmask}`);
   await assertPortAvailable(config.host, config.port);
   console.log(`[launcher] Port ${config.port} is available`);
 
@@ -532,13 +526,15 @@ async function main() {
     console.log("[launcher] Health check passed");
 
     const model = config.models[0].id;
-    const smoke = await runSmokeChecks(rootUrl, config.apiKey, { mode: config.mode, model });
-    console.log(`[launcher] Smoke checks passed: ${JSON.stringify(smoke)}`);
+    if (process.argv.includes("--smoke") || process.argv.includes("--smoke-only")) {
+      const smoke = await runSmokeChecks(rootUrl, config.apiKey, { mode: config.mode, model });
+      console.log(`[launcher] Smoke checks passed: ${JSON.stringify(smoke)}`);
+    }
     console.log("");
     console.log("Add this custom model in Qoder:");
     console.log("  Provider:  OpenAI Compatible (Chat Completions)");
     console.log(`  Base URL:  ${apiBaseUrl}`);
-    console.log(`  API key:   ${config.apiKey}`);
+    console.log("  API key:   Use your configured Router key (never the AstrLink key)");
     console.log(`  Model ID:  ${model}`);
     console.log(`  Log file:  ${config.logFile}`);
     console.log("");
