@@ -387,12 +387,16 @@ export function createRouterServer({
       if (request.method === "GET" && url.pathname === "/health") {
         const ok = config.mode === "mock" || bridge?.ready === true;
         const capacity = await readCapacity();
+        const mcp = bridge?.status?.();
+        const authenticated = isAuthorized(request, config.apiKey);
+        // Health is public for local status dashboards. Do not expose local paths,
+        // process IDs, or verbose runtime errors to unauthenticated callers.
         sendJson(response, 200, {
           ok,
           service: "toolbox-router",
           mode: config.mode,
-          capacity,
-          ...(config.mode === "bridge" ? { mcp: bridge?.status?.() ?? { ready: false, toolCount: 0 } } : {}),
+          capacity: authenticated ? capacity : { ok: capacity.ok === true },
+          ...(config.mode === "bridge" ? { mcp: authenticated ? (mcp ?? { ready: false, toolCount: 0 }) : { ready: mcp?.ready === true, toolCount: Number.isSafeInteger(mcp?.toolCount) ? mcp.toolCount : 0 } } : {}),
         });
         return;
       }

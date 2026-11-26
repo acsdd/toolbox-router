@@ -95,8 +95,9 @@ test("bridge health reports readiness and MCP status", async () => {
       assert.equal(body.ok, true);
       assert.equal(body.mode, "bridge");
       assert.equal(body.mcp.toolCount, 1);
-      assert.equal(body.capacity.drive, "D:");
-      assert.equal(body.capacity.availableBytes, 700);
+      assert.equal(body.capacity.ok, true);
+      assert.equal(body.capacity.drive, undefined);
+      assert.equal(body.capacity.availableBytes, undefined);
     },
   );
 });

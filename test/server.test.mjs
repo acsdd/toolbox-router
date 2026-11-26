@@ -203,3 +203,17 @@ test("malformed JSON returns a client error", async () => {
 
   assert.equal(response.status, 400);
 });
+
+
+test("public health does not expose local filesystem paths or process IDs", async () => {
+  const config = { ...parseConfig({TOOLBOX_ROUTER_MODE:'mock'}), mode:'bridge' };
+  const bridge = { ready:true, status:()=>({ready:true,toolCount:7,pid:1234,home:'C:/private/home',runtime:'source'}) };
+  const probe = createRouterServer({config, logger:silentLogger, bridge, getCapacity:async()=>({ok:true,modelRoot:'D:/private/models',freeBytes:42})});
+  await new Promise(resolve=>probe.listen(0,'127.0.0.1',resolve));
+  try {
+    const response=await fetch(`http://127.0.0.1:${probe.address().port}/health`);
+    const text=await response.text();const body=JSON.parse(text);
+    assert.equal(body.mcp.ready,true);assert.equal(body.mcp.toolCount,7);assert.equal(body.capacity.ok,true);
+    assert.doesNotMatch(text,/private|1234|modelRoot|pid/);
+  } finally {probe.closeAllConnections();await new Promise(resolve=>probe.close(resolve));}
+});

@@ -63,7 +63,7 @@ test("a launcher shutdown message drains the router MCP child", async () => {
     while (Date.now() < deadline) {
       if (child.exitCode !== null) throw new Error(`Router exited during startup: ${stderr}`);
       try {
-        const response = await fetch(`http://127.0.0.1:${port}/health`);
+        const response = await fetch(`http://127.0.0.1:${port}/health`, { headers: { authorization: "Bearer lifecycle-test-key" } });
         if (response.ok) {
           health = await response.json();
           break;
@@ -160,7 +160,7 @@ test("shutdown aborts an active upstream chat request", async () => {
     while (Date.now() < deadline) {
       if (child.exitCode !== null) throw new Error(`Router exited during startup: ${stderr}`);
       try {
-        const response = await fetch(`http://127.0.0.1:${port}/health`);
+        const response = await fetch(`http://127.0.0.1:${port}/health`, { headers: { authorization: "Bearer lifecycle-test-key" } });
         if (response.ok && (await response.json()).ok === true) {
           ready = true;
           break;
