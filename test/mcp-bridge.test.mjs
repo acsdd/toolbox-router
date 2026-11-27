@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { parseConfig } from "../src/config.mjs";
+import { routerPolicyManifest } from "../src/contract-audit.mjs";
 import { ToolboxMcpBridge } from "../src/mcp-bridge.mjs";
 
 const FAKE_SERVER = fileURLToPath(new URL("./fixtures/fake-mcp-server.mjs", import.meta.url));
@@ -54,7 +55,60 @@ test("MCP bridge starts a real stdio child and filters its discovered tool surfa
   assert.equal(names.includes("gmail_connect"), false);
   assert.equal(names.includes("remote_dynamic_shell"), false);
   assert.equal(bridge.status().toolCount, 3);
+  assert.equal(bridge.status().contract.status, "unavailable");
   assert.match(bridge.status().home, /^D:\/Projects\/toolbox\/toolbox-router\/test-mcp\//);
+});
+
+test("MCP bridge fails startup when a shipped contract disagrees with discovery", async () => {
+  await mkdir(TEST_ROOT, { recursive: true });
+  const home = await mkdtemp(join(TEST_ROOT, "contract-drift-"));
+  cleanup.push(home);
+  const contractPath = join(home, "tool-contract.json");
+  const annotations = {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  };
+  const contract = {
+    schemaVersion: 1,
+    service: "toolbox-mcp",
+    version: "test",
+    groups: [],
+    tools: routerPolicyManifest().tools.map(({ name }) => ({
+      name,
+      group: "system",
+      description: name,
+      inputSchema: { type: "object", properties: {} },
+      annotations: { ...annotations },
+    })),
+  };
+  await writeFile(contractPath, JSON.stringify(contract));
+
+  const entries = [];
+  const config = parseConfig({
+    TOOLBOX_ROUTER_MODE: "bridge",
+    TOOLBOX_ROUTER_UPSTREAM_BASE_URL: "http://localhost:7770/v1",
+    TOOLBOX_ROUTER_UPSTREAM_API_KEY: "upstream-test-key",
+    TOOLBOX_ROUTER_UPSTREAM_MODEL: "test-model",
+    TOOLBOX_ROUTER_MCP_RUNTIME: "source",
+    TOOLBOX_ROUTER_MCP_COMMAND: process.execPath,
+    TOOLBOX_ROUTER_MCP_ARGS: JSON.stringify([FAKE_SERVER]),
+    TOOLBOX_ROUTER_MCP_HOME: home,
+    TOOLBOX_ROUTER_MCP_CONTRACT_PATH: contractPath,
+    TOOLBOX_ROUTER_MCP_STARTUP_TIMEOUT_MS: "5000",
+  });
+  const bridge = new ToolboxMcpBridge({
+    config,
+    logger: { info: (line) => entries.push(line), error: (line) => entries.push(line) },
+  });
+  cleanup.push(() => bridge.close());
+
+  await assert.rejects(() => bridge.start(), /contract does not match/);
+  assert.equal(bridge.ready, false);
+  assert.equal(bridge.status().contract.status, "drift");
+  assert.match(entries.join("\n"), /mcp_contract_audit/);
+  assert.doesNotMatch(entries.join("\n"), /remote_dynamic_shell/);
 });
 
 test("MCP bridge creates an isolated home and passes a disabled ops-panel port", async () => {
@@ -202,4 +256,55 @@ test("MCP bridge reports startup failure instead of pretending to be ready", asy
   await assert.rejects(() => bridge.start(), /connection closed|spawn|ENOENT|not found/i);
   assert.equal(bridge.ready, false);
   await bridge.close();
+});
+
+test("ensureReady restarts once after unexpected close and shares a single flight", async () => {
+  const bridge = await startBridge();
+  process.kill(bridge.pid, "SIGKILL");
+  await bridge.closedPromise;
+  assert.equal(bridge.ready, false);
+
+  const first = bridge.ensureReady();
+  const second = bridge.ensureReady();
+  assert.equal(first, second);
+  await first;
+
+  assert.equal(bridge.ready, true);
+  assert.equal(bridge.tools.length, 3);
+  assert.equal(bridge.restartAttempts, 0);
+});
+
+test("ensureReady fails closed when the restarted contract drifts", async () => {
+  await mkdir(TEST_ROOT, { recursive: true });
+  const home = await mkdtemp(join(TEST_ROOT, "restart-drift-"));
+  cleanup.push(home);
+  const contractPath = join(home, "tool-contract.json");
+  const entries = [];
+  const bridge = await startBridge(
+    { TOOLBOX_ROUTER_MCP_CONTRACT_PATH: contractPath },
+    { info: (line) => entries.push(line), error: (line) => entries.push(line) },
+  );
+  // Missing contract at startup is unavailable, so the first start succeeds.
+  assert.equal(bridge.status().contract.status, "unavailable");
+
+  process.kill(bridge.pid, "SIGKILL");
+  await bridge.closedPromise;
+
+  const annotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+  const drifted = {
+    schemaVersion: 1,
+    service: "toolbox-mcp",
+    version: "test",
+    groups: [],
+    tools: routerPolicyManifest().tools.map(({ name }) => ({
+      name, group: "system", description: name,
+      inputSchema: { type: "object", properties: {} },
+      annotations: { ...annotations },
+    })),
+  };
+  await writeFile(contractPath, JSON.stringify(drifted));
+
+  await assert.rejects(() => bridge.ensureReady(), /contract does not match/);
+  assert.equal(bridge.ready, false);
+  assert.match(entries.join("\n"), /mcp_restart_failed/);
 });

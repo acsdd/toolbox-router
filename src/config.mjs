@@ -193,6 +193,7 @@ export function parseConfig(env = process.env) {
       env.TOOLBOX_ROUTER_UPSTREAM_MODEL?.trim() ||
       (mode === "bridge" ? DEFAULT_UPSTREAM_MODEL : ""),
     timeoutMs: readInteger(env, "TOOLBOX_ROUTER_UPSTREAM_TIMEOUT_MS", 120_000, 1_000, 600_000),
+    maxRetries: readInteger(env, "TOOLBOX_ROUTER_UPSTREAM_MAX_RETRIES", 2, 0, 3),
   };
 
   if (mode === "bridge") {
@@ -206,6 +207,9 @@ export function parseConfig(env = process.env) {
     args: parseMcpArgs(env.TOOLBOX_ROUTER_MCP_ARGS),
     cwd: env.TOOLBOX_ROUTER_MCP_CWD?.trim() || "",
     home: mcpHome,
+    contractPath: env.TOOLBOX_ROUTER_MCP_CONTRACT_PATH?.trim()
+      ? normalizeLocalPath(env.TOOLBOX_ROUTER_MCP_CONTRACT_PATH.trim(), "TOOLBOX_ROUTER_MCP_CONTRACT_PATH")
+      : "",
     port: 0,
     startupTimeoutMs: readInteger(env, "TOOLBOX_ROUTER_MCP_STARTUP_TIMEOUT_MS", 15_000, 1_000, 120_000),
     callTimeoutMs: readInteger(env, "TOOLBOX_ROUTER_MCP_CALL_TIMEOUT_MS", 30_000, 100, 600_000),

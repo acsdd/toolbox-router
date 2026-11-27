@@ -10,7 +10,7 @@ $node = (Get-Command node.exe -ErrorAction Stop).Source
 $nodeVersion = (& $node --version).Trim()
 $nodeLicense = Join-Path $routerRoot "licenses\node-$nodeVersion.txt"
 if (!(Test-Path -LiteralPath $nodeLicense -PathType Leaf)) { throw "Add the official Node.js license for $nodeVersion at $nodeLicense before packaging." }
-foreach ($required in @((Join-Path $mcpRoot 'dist\index.js'), (Join-Path $widgetsRoot 'dist\index.js'), (Join-Path $routerRoot 'node_modules'))) {
+foreach ($required in @((Join-Path $mcpRoot 'dist\index.js'), (Join-Path $mcpRoot 'dist\tool-contract.json'), (Join-Path $widgetsRoot 'dist\index.js'), (Join-Path $routerRoot 'node_modules'))) {
   if (!(Test-Path -LiteralPath $required)) { throw 'Build Router, Toolbox MCP, and toolbox-widgets dependencies before packaging.' }
 }
 New-Item -ItemType Directory -Path $destination | Out-Null
@@ -28,6 +28,7 @@ New-Item -ItemType Directory -Path (Join-Path $destination 'mcp\dist') -Force | 
 Get-ChildItem -LiteralPath (Join-Path $mcpRoot 'dist') -File -Filter '*.js' | ForEach-Object {
   Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $destination 'mcp\dist')
 }
+Copy-Item -LiteralPath (Join-Path $mcpRoot 'dist\tool-contract.json') -Destination (Join-Path $destination 'mcp\dist\tool-contract.json')
 Copy-Tree (Join-Path $mcpRoot 'node_modules') (Join-Path $destination 'mcp\node_modules')
 Copy-Item -LiteralPath (Join-Path $mcpRoot 'package.json') -Destination (Join-Path $destination 'mcp\package.json')
 Copy-Item -LiteralPath (Join-Path $mcpRoot 'LICENSE') -Destination (Join-Path $destination 'mcp\LICENSE')

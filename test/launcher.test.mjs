@@ -97,6 +97,7 @@ test("buildChildEnv forwards bridge upstream MCP capacity and model settings", (
     TOOLBOX_ROUTER_MCP_COMMAND: "D:/Programs/Model Farm/Model Farm.exe",
     TOOLBOX_ROUTER_MCP_ARGS: '["D:/Programs/Model Farm/resources/app.asar/dist/index.js"]',
     TOOLBOX_ROUTER_MCP_CWD: "D:/Programs/Model Farm",
+    TOOLBOX_ROUTER_MCP_CONTRACT_PATH: "D:/Projects/toolbox/toolbox-mcp/dist/tool-contract.json",
     TOOLBOX_ROUTER_MODELS: '[{"id":"toolbox-spike","upstreamModel":"grok-4.7"}]',
   });
   const childEnv = buildChildEnv(config, { PATH: "kept-path" });
@@ -107,6 +108,7 @@ test("buildChildEnv forwards bridge upstream MCP capacity and model settings", (
   assert.equal(childEnv.TOOLBOX_ROUTER_MCP_RUNTIME, "installed");
   assert.equal(childEnv.TOOLBOX_ROUTER_MCP_COMMAND, config.mcp.command);
   assert.equal(childEnv.TOOLBOX_ROUTER_MCP_ARGS, JSON.stringify(config.mcp.args));
+  assert.equal(childEnv.TOOLBOX_ROUTER_MCP_CONTRACT_PATH, config.mcp.contractPath);
   assert.equal(childEnv.TOOLBOX_ROUTER_DATA_DIR, config.dataDir);
   assert.equal(childEnv.TOOLBOX_ROUTER_MODEL_ROOT, config.modelRoot);
   assert.equal(childEnv.TOOLBOX_ROUTER_CAPACITY_DRIVE, "D:");
@@ -120,6 +122,7 @@ test("runtime resolution verifies source and installed entry points", () => {
   });
   assert.equal(source.command, process.execPath);
   assert.deepEqual(source.args, ["D:/Projects/Toolbox/toolbox-mcp/dist/index.js"]);
+  assert.equal(source.contractPath, "D:/Projects/Toolbox/toolbox-mcp/dist/tool-contract.json");
   assert.equal(source.runtime, "source");
 
   const config = parseConfig({ TOOLBOX_ROUTER_MCP_RUNTIME: "installed" });
@@ -140,6 +143,7 @@ test("source runtime can use the bundled MCP directory", async () => {
     existsSync: path => path === "D:/bundle/mcp/dist/index.js",
   });
   assert.deepEqual(runtime.args, ["D:/bundle/mcp/dist/index.js"]);
+  assert.equal(runtime.contractPath, "D:/bundle/mcp/dist/tool-contract.json");
   assert.equal(runtime.command, process.execPath);
 });
 

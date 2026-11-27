@@ -360,3 +360,51 @@ test("chat loop stops at the configured model-round bound", async () => {
   );
   assert.equal(bridge.calls.length, 1);
 });
+
+test("chat loop logs real duration and request id, and ignores invalid usage", async () => {
+  const logs = [];
+  const logger = { info: (line) => logs.push(JSON.parse(line)), error() {} };
+  const upstream = {
+    complete: async () => ({
+      choices: [{ index: 0, message: { role: "assistant", content: "done" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: -5, completion_tokens: "x", total_tokens: 11 },
+    }),
+  };
+  const result = await runChatLoop({
+    payload: { model: "toolbox-spike", messages: [{ role: "user", content: "hi" }] },
+    config: config(),
+    upstream,
+    bridge: fakeBridge(),
+    logger,
+    requestId: "req-test-123",
+  });
+  assert.equal(result.usage.prompt_tokens, 0);
+  assert.equal(result.usage.completion_tokens, 0);
+  assert.equal(result.usage.total_tokens, 11);
+  const complete = logs.find((entry) => entry.event === "chat_loop_complete");
+  assert.equal(complete.request_id, "req-test-123");
+  assert.equal(typeof complete.duration_ms, "number");
+  assert.equal(complete.duration_ms >= 0, true);
+});
+
+test("tool execution failure exposes only safe error type/code", async () => {
+  const requests = [];
+  const upstream = scriptedUpstream([
+    completion({ role: "assistant", content: null, tool_calls: [toolCall("system_stats")] }),
+    completion({ role: "assistant", content: "recovered" }),
+  ], requests);
+  const bridge = fakeBridge({
+    async callTool() {
+      const err = new Error("secret D:/private/path");
+      err.name = "TimeoutError";
+      err.code = "eternal_timeout";
+      throw err;
+    },
+  });
+  const result = await run({}, upstream, bridge);
+  assert.equal(result.message.content, "recovered");
+  const toolMessage = requests[1].messages.find((message) => message.role === "tool");
+  assert.equal(toolMessage.content, "Toolbox tool system_stats failed: TimeoutError (eternal_timeout)");
+  assert.equal(toolMessage.content.includes("secret"), false);
+  assert.equal(toolMessage.content.includes("D:/"), false);
+});

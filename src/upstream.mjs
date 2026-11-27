@@ -31,6 +31,17 @@ function redact(value, apiKey) {
     .slice(0, 1000);
 }
 
+export function classifyProviderStateError(text, status) {
+  if (![400, 409, 422].includes(status)) return "upstream_http_error";
+  const body = String(text).slice(0, 16_384);
+  const thoughtSignature = /thought[\s_-]*signature/i.test(body);
+  const stateWords = /missing|required|invalid|expired|not found|must be (?:supplied|provided|passed)/i.test(body);
+  const providerState = /(?:conversation|provider|request|function call)[\s\S]{0,100}(?:state|context)[\s\S]{0,100}(?:missing|invalid|expired|not found|required)/i.test(body);
+  return (thoughtSignature && stateWords) || providerState
+    ? "upstream_provider_state"
+    : "upstream_http_error";
+}
+
 async function readResponseText(response) {
   const declaredSize = Number(response.headers.get("content-length"));
   if (Number.isFinite(declaredSize) && declaredSize > MAX_RESPONSE_BYTES) {
@@ -77,6 +88,38 @@ function validateCompletion(value) {
   return value;
 }
 
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+
+function parseRetryAfterMs(header) {
+  if (!header) return 0;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds)) return Math.min(Math.max(seconds * 1000, 0), 30_000);
+  const date = Date.parse(header);
+  if (Number.isFinite(date)) return Math.min(Math.max(date - Date.now(), 0), 30_000);
+  return 0;
+}
+
+function isRetryable(error) {
+  if (!(error instanceof UpstreamError)) return false;
+  if (["upstream_provider_state", "upstream_timeout", "upstream_cancelled", "invalid_upstream_json", "invalid_upstream_response"].includes(error.code)) return false;
+  return error.code === "upstream_network_error" || RETRYABLE_STATUS.has(error.status);
+}
+
+function abortableDelay(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new UpstreamError("Upstream Chat Completions request was cancelled", 499, "upstream_cancelled"));
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new UpstreamError("Upstream Chat Completions request was cancelled", 499, "upstream_cancelled"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export function createUpstreamClient({
   baseUrl,
   apiKey,
@@ -84,6 +127,7 @@ export function createUpstreamClient({
   timeoutMs,
   fetchImpl = fetch,
   logger = console,
+  maxRetries = 2,
 }) {
   if (!baseUrl || !apiKey || !model) {
     throw new Error("Upstream base URL, API key, and model are required");
@@ -104,76 +148,104 @@ export function createUpstreamClient({
       }
       if (Array.isArray(payload.tools) && payload.tools.length > 0) body.tools = payload.tools;
 
-      const controller = new AbortController();
-      const requestSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
-      let timedOut = false;
-      const timer = setTimeout(() => {
-        timedOut = true;
-        controller.abort();
-      }, timeoutMs);
-      const startedAt = Date.now();
+      async function attemptOnce() {
+        const controller = new AbortController();
+        const requestSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
+        let timedOut = false;
+        const timer = setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, timeoutMs);
+        const startedAt = Date.now();
 
-      try {
-        const response = await fetchImpl(endpoint, {
-          method: "POST",
-          headers: {
-            authorization: `Bearer ${apiKey}`,
-            "content-type": "application/json",
-            accept: "application/json",
-          },
-          body: JSON.stringify(body),
-          signal: requestSignal,
-        });
-        const text = await readResponseText(response);
-
-        if (!response.ok) {
-          throw new UpstreamError(
-            `Upstream Chat Completions failed with HTTP ${response.status}`,
-            response.status,
-            "upstream_http_error",
-          );
-        }
-
-        let parsed;
         try {
-          parsed = JSON.parse(text);
-        } catch {
-          throw new UpstreamError("Upstream returned invalid JSON", response.status, "invalid_upstream_json");
-        }
+          const response = await fetchImpl(endpoint, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${apiKey}`,
+              "content-type": "application/json",
+              accept: "application/json",
+            },
+            body: JSON.stringify(body),
+            signal: requestSignal,
+          });
+          const text = await readResponseText(response);
 
-        logger.info(
-          JSON.stringify({
-            event: "upstream_request",
-            model: selectedModel,
-            status: response.status,
-            duration_ms: Date.now() - startedAt,
-            message_count: Array.isArray(payload.messages) ? payload.messages.length : 0,
-            tool_count: Array.isArray(payload.tools) ? payload.tools.length : 0,
-          }),
-        );
-        return validateCompletion(parsed);
-      } catch (error) {
-        if (error instanceof UpstreamError) {
-          logger.error(
+          if (!response.ok) {
+            const code = classifyProviderStateError(text, response.status);
+            const error = new UpstreamError(
+              code === "upstream_provider_state"
+                ? "The model provider requires missing conversation state"
+                : `Upstream Chat Completions failed with HTTP ${response.status}`,
+              response.status,
+              code,
+            );
+            error.retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+            throw error;
+          }
+
+          let parsed;
+          try {
+            parsed = JSON.parse(text);
+          } catch {
+            throw new UpstreamError("Upstream returned invalid JSON", response.status, "invalid_upstream_json");
+          }
+
+          logger.info(
             JSON.stringify({
               event: "upstream_request",
               model: selectedModel,
-              status: error.status,
+              status: response.status,
               duration_ms: Date.now() - startedAt,
-              error: redact(error.message, apiKey),
+              message_count: Array.isArray(payload.messages) ? payload.messages.length : 0,
+              tool_count: Array.isArray(payload.tools) ? payload.tools.length : 0,
             }),
           );
-          throw error;
+          return validateCompletion(parsed);
+        } catch (error) {
+          if (error instanceof UpstreamError) {
+            logger.error(
+              JSON.stringify({
+                event: "upstream_request",
+                model: selectedModel,
+                status: error.status,
+                duration_ms: Date.now() - startedAt,
+                error: redact(error.message, apiKey),
+              }),
+            );
+            throw error;
+          }
+          if (signal?.aborted) {
+            throw new UpstreamError("Upstream Chat Completions request was cancelled", 499, "upstream_cancelled");
+          }
+          if (timedOut || controller.signal.aborted) {
+            throw new UpstreamError(`Upstream Chat Completions timed out after ${timeoutMs}ms`, 504, "upstream_timeout");
+          }
+          throw new UpstreamError("Upstream Chat Completions request failed", 0, "upstream_network_error");
+        } finally {
+          clearTimeout(timer);
         }
-        if (signal?.aborted) {
-          throw new UpstreamError("Upstream Chat Completions request was cancelled", 499, "upstream_cancelled");
+      }
+
+      for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+        try {
+          return await attemptOnce();
+        } catch (error) {
+          if (!isRetryable(error) || attempt === maxRetries || signal?.aborted) throw error;
+          const base = Math.min(250 * 2 ** attempt, 5000);
+          const jitter = Math.floor(Math.random() * 100);
+          const delayMs = Math.max(error.retryAfterMs ?? 0, base) + jitter;
+          logger.info(
+            JSON.stringify({
+              event: "upstream_retry",
+              model: selectedModel,
+              attempt: attempt + 1,
+              status: error.status,
+              delay_ms: delayMs,
+            }),
+          );
+          await abortableDelay(delayMs, signal);
         }
-        if (timedOut || controller.signal.aborted) {
-          throw new UpstreamError(`Upstream Chat Completions timed out after ${timeoutMs}ms`, 504, "upstream_timeout");
-        }
-        throw new UpstreamError("Upstream Chat Completions request failed", 0, "upstream_network_error");
-      } finally {
-        clearTimeout(timer);
       }
     },
   };

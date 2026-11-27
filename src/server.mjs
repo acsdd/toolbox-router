@@ -7,10 +7,12 @@ import { ChatLoopError, runChatLoop } from "./chat-loop.mjs";
 import { assertModelAvailable, CapacityError, filterModelsByCapacity, inspectCapacity } from "./capacity.mjs";
 import { assertSecureRouterKey, parseConfig } from "./config.mjs";
 import { ToolboxMcpBridge } from "./mcp-bridge.mjs";
+import { RequestValidationError, boundedModelId, validateChatPayload } from "./request-validation.mjs";
 import { createUpstreamClient, UpstreamError } from "./upstream.mjs";
 
 const MODEL_ID = "toolbox-spike";
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
+const MAX_DRAIN_BYTES = 10 * 1024 * 1024;
 
 class HttpError extends Error {
   constructor(status, message, code) {
@@ -50,15 +52,27 @@ function isAuthorized(request, apiKey) {
 async function readJson(request) {
   const chunks = [];
   let size = 0;
+  let overflow = false;
 
   for await (const chunk of request) {
     size += chunk.length;
     if (size > MAX_BODY_BYTES) {
-      throw new HttpError(413, "Request body is too large", "request_too_large");
+      overflow = true;
+      chunks.length = 0;
+      if (size > MAX_DRAIN_BYTES) {
+        request.destroy();
+        throw new HttpError(413, "Request body is too large", "request_too_large");
+      }
+      continue;
     }
-    chunks.push(chunk);
+    if (!overflow) chunks.push(chunk);
   }
 
+  const contentType = request.headers["content-type"]?.split(";")[0].trim().toLowerCase();
+  if (contentType !== "application/json") {
+    throw new HttpError(415, "Content-Type must be application/json", "unsupported_media_type");
+  }
+  if (overflow) throw new HttpError(413, "Request body is too large", "request_too_large");
   if (chunks.length === 0) {
     throw new HttpError(400, "Request body must be valid JSON", "invalid_json");
   }
@@ -300,6 +314,9 @@ function clientErrorMessage(error) {
   if (error instanceof HttpError || error instanceof ChatLoopError || error instanceof CapacityError) return error.message;
   if (error instanceof UpstreamError) {
     if (error.code === "upstream_timeout") return "Upstream Chat Completions request timed out";
+    if (error.code === "upstream_provider_state") {
+      return "The model provider requires missing conversation state, such as a thought signature. Start a new chat or select a provider that preserves tool-call state.";
+    }
     if (error.status === 402) return "The model provider requires payment or account access. Check your provider account or select another available model.";
     if (error.status >= 400 && error.status <= 599) {
       return `Upstream Chat Completions failed with HTTP ${error.status}`;
@@ -426,13 +443,17 @@ export function createRouterServer({
 
       if (request.method === "POST" && url.pathname === "/v1/chat/completions") {
         const payload = await readJson(request);
-        const selectedModel = config.models.find((model) => model.id === payload?.model);
+        const requestId = randomUUID();
+        response.setHeader("x-request-id", requestId);
+        validateChatPayload(payload);
+        const selectedModel = config.models.find((model) => model.id === payload.model);
         if (!selectedModel) {
-          throw new HttpError(404, `Unknown model: ${payload?.model ?? "(missing)"}`, "model_not_found");
+          throw new HttpError(404, `Unknown model: ${boundedModelId(payload.model) || "(missing)"}`, "model_not_found");
         }
         logger.info(
           JSON.stringify({
             event: "chat_request",
+            request_id: requestId,
             model: selectedModel.id,
             stream: payload?.stream === true,
             tool_choice: ["auto", "none", "required"].includes(payload?.tool_choice)
@@ -445,12 +466,15 @@ export function createRouterServer({
 
         assertModelAvailable(selectedModel, await readCapacity());
 
-        if (!Array.isArray(payload.messages)) {
-          throw new HttpError(400, "messages must be an array", "invalid_messages");
-        }
-
         if (config.mode === "bridge") {
           if (!upstream) throw new HttpError(503, "Upstream model is not configured", "upstream_not_ready");
+          if (!bridge.ready && typeof bridge.ensureReady === "function") {
+            try {
+              await bridge.ensureReady();
+            } catch {
+              throw new ChatLoopError("Toolbox MCP bridge is not ready", 503, "mcp_not_ready");
+            }
+          }
           const clientAbort = new AbortController();
           const onClose = () => { if (!response.writableFinished) clientAbort.abort(); };
           response.once("close", onClose);
@@ -458,7 +482,7 @@ export function createRouterServer({
           const signal = shutdownSignal ? AbortSignal.any([shutdownSignal, clientAbort.signal]) : clientAbort.signal;
           let result;
           try {
-            result = await runChatLoop({ payload, config, upstream, upstreamModel: selectedModel.upstreamModel, bridge, logger, signal });
+            result = await runChatLoop({ payload, config, upstream, upstreamModel: selectedModel.upstreamModel, bridge, logger, signal, requestId });
           } finally {
             response.off("close", onClose);
           }
@@ -474,7 +498,7 @@ export function createRouterServer({
       sendError(response, 404, "Not found", "not_found");
     } catch (error) {
       if (response.destroyed) return;
-      if (error instanceof HttpError) {
+      if (error instanceof HttpError || error instanceof RequestValidationError) {
         sendError(response, error.status, error.message, error.code);
         return;
       }

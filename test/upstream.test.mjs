@@ -105,6 +105,77 @@ test("upstream client forwards supported generation settings and tool choice", a
   );
 });
 
+for (const scenario of [
+  {
+    name: "missing thought signature",
+    status: 400,
+    text: "A thought signature is required for this function call.",
+    expectedCode: "upstream_provider_state",
+  },
+  {
+    name: "expired conversation context",
+    status: 409,
+    text: "The conversation context has expired.",
+    expectedCode: "upstream_provider_state",
+  },
+  {
+    name: "invalid function call context",
+    status: 422,
+    text: "Function call context is invalid.",
+    expectedCode: "upstream_provider_state",
+  },
+  {
+    name: "rate limit mentioning thought signature",
+    status: 429,
+    text: "Rate limited: thought signature is required.",
+    expectedCode: "upstream_http_error",
+  },
+  {
+    name: "present thought signature without missing state",
+    status: 400,
+    text: "The thought signature was processed successfully.",
+    expectedCode: "upstream_http_error",
+  },
+  {
+    name: "unrelated bad request",
+    status: 400,
+    text: "messages must be an array",
+    expectedCode: "upstream_http_error",
+  },
+]) {
+  test(`upstream client safely classifies ${scenario.name}`, async () => {
+    const entries = [];
+    await withServer(
+      (_request, response) => {
+        response.writeHead(scenario.status, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          error: { message: `${scenario.text} upstream-secret-key private-user-prompt` },
+        }));
+      },
+      async (baseUrl) => {
+        const client = createUpstreamClient(
+          clientOptions(baseUrl, {
+            logger: { info: (line) => entries.push(line), error: (line) => entries.push(line) },
+          }),
+        );
+        await assert.rejects(
+          () => client.complete({ messages: [{ role: "user", content: "private-user-prompt" }] }),
+          (error) => {
+            assert.ok(error instanceof UpstreamError);
+            assert.equal(error.status, scenario.status);
+            assert.equal(error.code, scenario.expectedCode);
+            assert.doesNotMatch(error.message, /thought signature|conversation context|upstream-secret-key|private-user-prompt/i);
+            return true;
+          },
+        );
+      },
+    );
+
+    const logs = entries.join("\n");
+    assert.doesNotMatch(logs, /thought signature|conversation context|upstream-secret-key|private-user-prompt/i);
+  });
+}
+
 test("upstream client rejects provider errors without exposing keys prompts or provider text", async () => {
   const entries = [];
   await withServer(
@@ -317,4 +388,47 @@ test("upstream client logs metadata without prompts responses or credentials", a
   assert.doesNotMatch(logs, /private-user-prompt/);
   assert.doesNotMatch(logs, /private-provider-answer/);
   assert.doesNotMatch(logs, /upstream-secret-key/);
+});
+
+function jsonResponse(body, status = 200, headers = {}) {
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
+}
+const okCompletion = { choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }] };
+
+test("retries transient 429 then succeeds, honoring bounded retry-after", async () => {
+  let calls = 0;
+  const client = createUpstreamClient({
+    baseUrl: "http://127.0.0.1:9/v1", apiKey: "k", model: "m", timeoutMs: 1000, maxRetries: 2,
+    logger: { info() {}, error() {} },
+    fetchImpl: async () => {
+      calls += 1;
+      if (calls === 1) return jsonResponse({ error: "rate" }, 429, { "retry-after": "0" });
+      return jsonResponse(okCompletion);
+    },
+  });
+  const result = await client.complete({ messages: [{ role: "user", content: "hi" }] });
+  assert.equal(calls, 2);
+  assert.equal(result.choices[0].message.content, "ok");
+});
+
+test("does not retry provider-state, invalid JSON, timeout, or cancellation", async () => {
+  let calls = 0;
+  const client = createUpstreamClient({
+    baseUrl: "http://127.0.0.1:9/v1", apiKey: "k", model: "m", timeoutMs: 1000, maxRetries: 2,
+    logger: { info() {}, error() {} },
+    fetchImpl: async () => { calls += 1; return jsonResponse({ error: "thought signature missing" }, 400); },
+  });
+  await assert.rejects(() => client.complete({ messages: [] }), (e) => e.code === "upstream_provider_state");
+  assert.equal(calls, 1);
+});
+
+test("maxRetries 0 disables retry", async () => {
+  let calls = 0;
+  const client = createUpstreamClient({
+    baseUrl: "http://127.0.0.1:9/v1", apiKey: "k", model: "m", timeoutMs: 1000, maxRetries: 0,
+    logger: { info() {}, error() {} },
+    fetchImpl: async () => { calls += 1; return jsonResponse({ error: "boom" }, 503); },
+  });
+  await assert.rejects(() => client.complete({ messages: [] }));
+  assert.equal(calls, 1);
 });

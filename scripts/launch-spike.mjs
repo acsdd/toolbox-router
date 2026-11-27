@@ -48,7 +48,13 @@ export function resolveSourceRuntime(sourceRoot = DEFAULT_TOOLBOX_SOURCE, { exis
   const root = normalizePath(sourceRoot);
   const entry = normalizePath(join(root, "dist", "index.js"));
   if (!existsSync(entry)) throw new Error(`Toolbox source MCP entry not found: ${entry}`);
-  return { runtime: "source", command: process.execPath, args: [entry], cwd: root };
+  return {
+    runtime: "source",
+    command: process.execPath,
+    args: [entry],
+    cwd: root,
+    contractPath: normalizePath(join(root, "dist", "tool-contract.json")),
+  };
 }
 
 export function resolveInstalledRuntime(config, { env = process.env, existsSync = fsExistsSync } = {}) {
@@ -288,6 +294,7 @@ export function buildChildEnv(config, env = process.env) {
     TOOLBOX_ROUTER_MCP_COMMAND: config.mcp.command,
     TOOLBOX_ROUTER_MCP_ARGS: JSON.stringify(config.mcp.args),
     TOOLBOX_ROUTER_MCP_CWD: config.mcp.cwd,
+    TOOLBOX_ROUTER_MCP_CONTRACT_PATH: config.mcp.contractPath,
     TOOLBOX_ROUTER_MCP_STARTUP_TIMEOUT_MS: String(config.mcp.startupTimeoutMs),
     TOOLBOX_ROUTER_MCP_CALL_TIMEOUT_MS: String(config.mcp.callTimeoutMs),
     TOOLBOX_ROUTER_MCP_MAX_RESULT_BYTES: String(config.mcp.maxResultBytes),
@@ -481,6 +488,7 @@ async function main() {
       config.mcp.command = runtime.command;
       config.mcp.args = runtime.args;
       config.mcp.cwd = runtime.cwd;
+      if (runtime.contractPath) config.mcp.contractPath = runtime.contractPath;
       console.log(`[launcher] MCP runtime: ${runtime.runtime}`);
     }
 

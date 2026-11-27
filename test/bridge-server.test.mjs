@@ -70,7 +70,14 @@ function readyBridge() {
         function: { name: "system_stats", description: "System stats", parameters: { type: "object", properties: {} } },
       },
     ],
-    status: () => ({ ready: true, toolCount: 1, runtime: "source", pid: 123, home: "D:/Projects/toolbox/toolbox-router/mcp-home" }),
+    status: () => ({
+      ready: true,
+      toolCount: 1,
+      runtime: "source",
+      pid: 123,
+      home: "D:/Projects/toolbox/toolbox-router/mcp-home",
+      contract: { ok: true, status: "aligned", policyDigest: "a".repeat(64) },
+    }),
     async callTool() {
       return { isError: false, content: '{"cpu":12}' };
     },
@@ -95,9 +102,14 @@ test("bridge health reports readiness and MCP status", async () => {
       assert.equal(body.ok, true);
       assert.equal(body.mode, "bridge");
       assert.equal(body.mcp.toolCount, 1);
+      assert.equal(body.mcp.contract, undefined);
       assert.equal(body.capacity.ok, true);
       assert.equal(body.capacity.drive, undefined);
       assert.equal(body.capacity.availableBytes, undefined);
+
+      const authenticatedResponse = await fetch(`${baseUrl}/health`, { headers: headers() });
+      const authenticatedBody = await authenticatedResponse.json();
+      assert.equal(authenticatedBody.mcp.contract.status, "aligned");
     },
   );
 });
@@ -436,6 +448,36 @@ test("provider payment errors offer safe recovery guidance", async () => {
   });
 });
 
+test("provider state errors return recovery guidance without exposing provider text", async () => {
+  const entries = [];
+  await withRouter({ bridge: readyBridge(), upstream: {
+    async complete() {
+      throw new UpstreamError(
+        "private provider body thought_signature upstream-test-key",
+        400,
+        "upstream_provider_state",
+      );
+    },
+  }, logger: { info: (line) => entries.push(line), error: (line) => entries.push(line) } }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({ model: "toolbox-spike", messages: [{ role: "user", content: "test" }] }),
+    });
+    const body = await response.json();
+    assert.equal(response.status, 400);
+    assert.equal(body.error.code, "upstream_provider_state");
+    assert.equal(
+      body.error.message,
+      "The model provider requires missing conversation state, such as a thought signature. Start a new chat or select a provider that preserves tool-call state.",
+    );
+    assert.doesNotMatch(JSON.stringify(body), /private provider body|thought_signature|upstream-test-key/);
+  });
+
+  const logs = entries.join("\n");
+  assert.doesNotMatch(logs, /private provider body|thought_signature|upstream-test-key/);
+});
+
 test("disconnecting the client cancels an in-flight upstream request", async () => {
   let started;
   const upstreamStarted = new Promise((resolve) => { started = resolve; });
@@ -466,7 +508,7 @@ test("request logs never include caller-supplied tool-choice contents", async ()
   await withRouter({ bridge: readyBridge(), upstream: { async complete() { return completion({ role: "assistant", content: "ok" }); } }, logger: { info: line => entries.push(line), error: line => entries.push(line) } }, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/v1/chat/completions`, {
       method: "POST", headers: headers(),
-      body: JSON.stringify({ model: "toolbox-spike", messages: [{ role: "user", content: "hello" }], tool_choice: { type: "function", private: "SYNTHETIC-PRIVATE-DATA" } }),
+      body: JSON.stringify({ model: "toolbox-spike", messages: [{ role: "user", content: "hello" }], tool_choice: { type: "function", function: { name: "system_stats" }, private: "SYNTHETIC-PRIVATE-DATA" } }),
     });
     assert.equal(response.status, 200);
   });
@@ -477,5 +519,61 @@ test("unreachable upstream returns a gateway error", async () => {
     const response = await fetch(`${baseUrl}/v1/chat/completions`, { method: "POST", headers: headers(), body: JSON.stringify({ model: "toolbox-spike", messages: [{ role: "user", content: "hello" }] }) });
     assert.equal(response.status, 502);
     assert.equal((await response.json()).error.code, "upstream_network_error");
+  });
+});
+
+test("bridge chat rejects non-JSON content type with 415", async () => {
+  await withRouter({ bridge: readyBridge(), upstream: { complete: async () => completion({ role: "assistant", content: "unused" }) } }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${API_KEY}`, "content-type": "text/plain" },
+      body: "model=toolbox-spike",
+    });
+    const body = await response.json();
+    assert.equal(response.status, 415);
+    assert.equal(body.error.code, "unsupported_media_type");
+  });
+});
+
+test("bridge chat validates payload shape and returns a request id header", async () => {
+  await withRouter({ bridge: readyBridge(), upstream: { complete: async () => completion({ role: "assistant", content: "ok" }) } }, async (baseUrl) => {
+    const bad = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: "POST", headers: headers(),
+      body: JSON.stringify({ model: "toolbox-spike", messages: [{ role: "user", content: 42 }] }),
+    });
+    assert.equal(bad.status, 400);
+    assert.equal((await bad.json()).error.code, "invalid_messages");
+    assert.match(bad.headers.get("x-request-id"), /^[0-9a-f-]{36}$/);
+
+    const good = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: "POST", headers: headers(),
+      body: JSON.stringify({ model: "toolbox-spike", messages: [{ role: "user", content: "hello" }] }),
+    });
+    assert.equal(good.status, 200);
+    assert.match(good.headers.get("x-request-id"), /^[0-9a-f-]{36}$/);
+  });
+});
+
+test("server recovers a dropped bridge through ensureReady", async () => {
+  const bridge = { ...readyBridge(), ready: false, async ensureReady() { this.ready = true; } };
+  await withRouter({ bridge, upstream: { complete: async () => completion({ role: "assistant", content: "recovered" }) } }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: "POST", headers: headers(),
+      body: JSON.stringify({ model: "toolbox-spike", messages: [{ role: "user", content: "hello" }] }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).choices[0].message.content, "recovered");
+  });
+});
+
+test("server keeps 503 when ensureReady fails", async () => {
+  const bridge = { ...readyBridge(), ready: false, async ensureReady() { throw new Error("nope"); } };
+  await withRouter({ bridge, upstream: { complete: async () => completion({ role: "assistant", content: "unused" }) } }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: "POST", headers: headers(),
+      body: JSON.stringify({ model: "toolbox-spike", messages: [{ role: "user", content: "hello" }] }),
+    });
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).error.code, "mcp_not_ready");
   });
 });

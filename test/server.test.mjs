@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 
 import { parseConfig } from "../src/config.mjs";
+import { boundedModelId, validateChatPayload } from "../src/request-validation.mjs";
 import { createRouterServer } from "../src/server.mjs";
 
 const silentLogger = {
@@ -216,4 +217,54 @@ test("public health does not expose local filesystem paths or process IDs", asyn
     assert.equal(body.mcp.ready,true);assert.equal(body.mcp.toolCount,7);assert.equal(body.capacity.ok,true);
     assert.doesNotMatch(text,/private|1234|modelRoot|pid/);
   } finally {probe.closeAllConnections();await new Promise(resolve=>probe.close(resolve));}
+});
+
+test("validateChatPayload rejects malformed messages, tools, tool_choice, stream", () => {
+  const base = { model: "toolbox-spike", messages: [{ role: "user", content: "hi" }] };
+  assert.throws(() => validateChatPayload({ ...base, messages: [] }), (e) => e.code === "invalid_messages");
+  assert.throws(() => validateChatPayload({ ...base, messages: [{ role: "boss", content: "hi" }] }), (e) => e.code === "invalid_messages");
+  assert.throws(() => validateChatPayload({ ...base, messages: [{ role: "tool", content: "x" }] }), (e) => e.code === "invalid_messages");
+  assert.throws(() => validateChatPayload({ ...base, messages: [{ role: "user", content: 42 }] }), (e) => e.code === "invalid_messages");
+  assert.throws(() => validateChatPayload({ ...base, tools: [{ type: "function", function: { name: "" } }] }), (e) => e.code === "invalid_tools");
+  assert.throws(() => validateChatPayload({ ...base, tool_choice: { type: "function", function: {} } }), (e) => e.code === "invalid_tool_choice");
+  assert.throws(() => validateChatPayload({ ...base, stream: "yes" }), (e) => e.code === "invalid_stream");
+  assert.throws(() => validateChatPayload({ ...base, model: "" }), (e) => e.code === "invalid_model");
+  assert.doesNotThrow(() => validateChatPayload(base));
+  assert.doesNotThrow(() => validateChatPayload({ ...base, tool_choice: "required", stream: true }));
+});
+
+test("boundedModelId strips control characters and caps length", () => {
+  const bounded = boundedModelId("a\u0000b".repeat(200));
+  assert.equal(bounded.length <= 128, true);
+  assert.equal(/[\u0000-\u001f\u007f]/.test(boundedModelId("a\u0000b")), false);
+});
+
+test("chat rejects non-JSON content type with 415", async () => {
+  const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+    method: "POST",
+    headers: { authorization: "Bearer test-key-123", "content-type": "text/plain" },
+    body: "model=toolbox-spike",
+  });
+  const body = await response.json();
+  assert.equal(response.status, 415);
+  assert.equal(body.error.code, "unsupported_media_type");
+});
+
+test("chat validates payload shape and returns a request id header", async () => {
+  const bad = await fetch(`${baseUrl}/v1/chat/completions`, {
+    method: "POST",
+    headers: { authorization: "Bearer test-key-123", "content-type": "application/json" },
+    body: JSON.stringify({ model: "toolbox-spike", messages: [{ role: "user", content: 42 }] }),
+  });
+  assert.equal(bad.status, 400);
+  assert.equal((await bad.json()).error.code, "invalid_messages");
+  assert.match(bad.headers.get("x-request-id"), /^[0-9a-f-]{36}$/);
+
+  const good = await fetch(`${baseUrl}/v1/chat/completions`, {
+    method: "POST",
+    headers: { authorization: "Bearer test-key-123", "content-type": "application/json" },
+    body: JSON.stringify({ model: "toolbox-spike", messages: [{ role: "user", content: "hello" }] }),
+  });
+  assert.equal(good.status, 200);
+  assert.match(good.headers.get("x-request-id"), /^[0-9a-f-]{36}$/);
 });

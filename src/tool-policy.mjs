@@ -1,4 +1,4 @@
-const BRIDGE_TOOL_NAMES = new Set([
+export const BRIDGE_TOOL_NAMES = new Set([
   "crypto_status",
   "crypto_refresh",
   "crypto_set_watchlist",
@@ -36,9 +36,9 @@ const BRIDGE_TOOL_NAMES = new Set([
   "widgets_import",
 ]);
 
-const CREDENTIAL_TOOL_NAMES = new Set(["gmail_connect", "gmail_disconnect"]);
+export const CREDENTIAL_TOOL_NAMES = new Set(["gmail_connect", "gmail_disconnect"]);
 
-const RESTRICTED_TOOL_NAMES = new Set([
+export const RESTRICTED_TOOL_NAMES = new Set([
   "gmail_status",
   "gmail_check",
   "gateway_requests",

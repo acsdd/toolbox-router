@@ -46,12 +46,22 @@ function normalizeToolCalls(message, round) {
   });
 }
 
+function safeUsageCount(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
 function addUsage(total, usage) {
   return {
-    prompt_tokens: total.prompt_tokens + (usage?.prompt_tokens ?? 0),
-    completion_tokens: total.completion_tokens + (usage?.completion_tokens ?? 0),
-    total_tokens: total.total_tokens + (usage?.total_tokens ?? 0),
+    prompt_tokens: total.prompt_tokens + safeUsageCount(usage?.prompt_tokens),
+    completion_tokens: total.completion_tokens + safeUsageCount(usage?.completion_tokens),
+    total_tokens: total.total_tokens + safeUsageCount(usage?.total_tokens),
   };
+}
+
+function safeFailureDetail(error) {
+  const name = typeof error?.name === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(error.name) ? error.name : "Error";
+  const code = typeof error?.code === "string" && /^[a-z0-9_]{1,64}$/.test(error.code) ? error.code : "unknown";
+  return `${name} (${code})`;
 }
 
 function toolResultText(name, result) {
@@ -59,7 +69,7 @@ function toolResultText(name, result) {
   return result?.content ?? "";
 }
 
-export async function runChatLoop({ payload, config, upstream, upstreamModel, bridge, logger = console, signal }) {
+export async function runChatLoop({ payload, config, upstream, upstreamModel, bridge, logger = console, signal, requestId }) {
   throwIfCancelled(signal);
   if (!bridge?.ready) {
     throw new ChatLoopError("Toolbox MCP bridge is not ready", 503, "mcp_not_ready");
@@ -71,6 +81,7 @@ export async function runChatLoop({ payload, config, upstream, upstreamModel, br
   const tools = mergeTools(clientTools, bridge.tools);
   const messages = payload.messages.map((message) => ({ ...message }));
   const usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+  const startedAt = Date.now();
 
   for (let round = 1; round <= config.limits.maxModelRounds; round += 1) {
     throwIfCancelled(signal);
@@ -97,9 +108,10 @@ export async function runChatLoop({ payload, config, upstream, upstreamModel, br
       logger.info(
         JSON.stringify({
           event: "chat_loop_complete",
+          request_id: requestId ?? null,
           rounds: round,
           tool_calls: 0,
-          duration_ms: 0,
+          duration_ms: Date.now() - startedAt,
         }),
       );
       return {
@@ -130,6 +142,7 @@ export async function runChatLoop({ payload, config, upstream, upstreamModel, br
       logger.info(
         JSON.stringify({
           event: "chat_loop_passthrough",
+          request_id: requestId ?? null,
           rounds: round,
           tool_calls: toolCalls.length,
         }),
@@ -172,7 +185,7 @@ export async function runChatLoop({ payload, config, upstream, upstreamModel, br
           content = toolResultText(name, result);
         } catch (error) {
           throwIfCancelled(signal);
-          content = `Toolbox tool ${name} failed`;
+          content = `Toolbox tool ${name} failed: ${safeFailureDetail(error)}`;
         }
       }
 
@@ -182,6 +195,7 @@ export async function runChatLoop({ payload, config, upstream, upstreamModel, br
     logger.info(
       JSON.stringify({
         event: "chat_loop_round",
+        request_id: requestId ?? null,
         round,
         tool_calls: toolCalls.length,
       }),

@@ -1,8 +1,10 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
+import { auditToolContract } from "./contract-audit.mjs";
 import { buildBridgeTools } from "./tool-policy.mjs";
 
 function withTimeout(promise, timeoutMs, label) {
@@ -50,12 +52,16 @@ export class ToolboxMcpBridge {
     this.logger = logger;
     this.ready = false;
     this.tools = [];
+    this.contract = null;
     this.registry = new Map();
     this.client = null;
     this.transport = null;
     this.pid = null;
     this.starting = null;
     this.closing = null;
+    this.restarting = null;
+    this.restartAttempts = 0;
+    this.lastRestartAt = 0;
     this.stderrBytes = 0;
     this.closedPromise = new Promise((resolveClose) => {
       this.resolveClosed = resolveClose;
@@ -69,6 +75,7 @@ export class ToolboxMcpBridge {
       runtime: this.config.mcp.runtime,
       pid: this.pid,
       home: this.config.mcp.home,
+      contract: this.contract,
     };
   }
 
@@ -82,6 +89,72 @@ export class ToolboxMcpBridge {
     } finally {
       this.starting = null;
     }
+  }
+
+  ensureReady() {
+    if (this.ready) return Promise.resolve();
+    if (this.restarting) return this.restarting;
+    if (this.closing) return Promise.reject(new Error("Toolbox MCP bridge is closing"));
+    const cooldown = this.restartAttempts > 0 ? Math.min(30_000, 1000 * 2 ** (this.restartAttempts - 1)) : 0;
+    if (Date.now() - this.lastRestartAt < cooldown) {
+      return Promise.reject(new Error("Toolbox MCP restart is cooling down"));
+    }
+    this.restarting = this.restartInternal().finally(() => {
+      this.restarting = null;
+    });
+    return this.restarting;
+  }
+
+  async restartInternal() {
+    this.lastRestartAt = Date.now();
+    this.restartAttempts += 1;
+    this.logger.info(JSON.stringify({ event: "mcp_restart_attempt", attempt: this.restartAttempts }));
+    try {
+      await this.close().catch(() => {});
+      this.closing = null;
+      this.closedPromise = new Promise((resolveClose) => {
+        this.resolveClosed = resolveClose;
+      });
+      this.stderrBytes = 0;
+      await this.start();
+      this.restartAttempts = 0;
+    } catch (error) {
+      this.ready = false;
+      this.logger.error(JSON.stringify({ event: "mcp_restart_failed", error_type: safeErrorType(error) }));
+      throw error;
+    }
+  }
+
+  resolveContractPath() {
+    if (this.config.mcp.contractPath) return this.config.mcp.contractPath;
+    const entry = this.config.mcp.args.find((arg) => /[\\/]dist[\\/]index\.js$/i.test(arg));
+    if (!entry) return "";
+    return resolve(this.config.mcp.cwd || process.cwd(), dirname(entry), "tool-contract.json");
+  }
+
+  async loadContract(discoveredTools) {
+    const contractPath = this.resolveContractPath();
+    if (!contractPath || /\.asar[\\/]/i.test(contractPath)) {
+      return auditToolContract(undefined, discoveredTools);
+    }
+
+    let text;
+    try {
+      text = await readFile(contractPath, "utf8");
+    } catch (error) {
+      if (error?.code === "ENOENT" || error?.code === "ENOTDIR") {
+        return auditToolContract(undefined, discoveredTools);
+      }
+      throw new Error("Toolbox MCP contract could not be read");
+    }
+
+    let contract;
+    try {
+      contract = JSON.parse(text);
+    } catch {
+      contract = null;
+    }
+    return auditToolContract(contract, discoveredTools);
   }
 
   async startInternal() {
@@ -133,10 +206,25 @@ export class ToolboxMcpBridge {
         this.config.mcp.startupTimeoutMs,
         "MCP tools/list",
       );
-      this.tools = buildBridgeTools(listed.tools);
+      const discoveredTools = Array.isArray(listed.tools) ? listed.tools : [];
+      this.contract = await this.loadContract(discoveredTools);
+      if (this.contract.status !== "unavailable" && !this.contract.ok) {
+        this.logger.error(
+          JSON.stringify({
+            event: "mcp_contract_audit",
+            status: this.contract.status,
+            policy_digest: this.contract.policyDigest,
+            missing_from_policy: this.contract.missingFromPolicy.length,
+            missing_from_discovery: this.contract.missingFromDiscovery.length,
+          }),
+        );
+        throw new Error("Toolbox MCP contract does not match Router policy");
+      }
+
+      this.tools = buildBridgeTools(discoveredTools);
       const allowedNames = new Set(this.tools.map((tool) => tool.function.name));
       this.registry = new Map(
-        (Array.isArray(listed.tools) ? listed.tools : [])
+        discoveredTools
           .filter((tool) => allowedNames.has(tool.name))
           .map((tool) => [tool.name, tool]),
       );

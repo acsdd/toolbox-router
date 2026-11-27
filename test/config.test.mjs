@@ -230,3 +230,30 @@ test("parseConfig rejects malformed duplicate or unsafe model catalog entries", 
     assert.throws(() => parseConfig({ TOOLBOX_ROUTER_MODELS: catalog }), /TOOLBOX_ROUTER_MODELS/);
   }
 });
+
+test("parseConfig preserves an explicit MCP contract path and rejects relative paths", () => {
+  assert.equal(parseConfig({}).mcp.contractPath, "");
+  assert.equal(
+    parseConfig({
+      TOOLBOX_ROUTER_MCP_CONTRACT_PATH: "D:\\Projects\\toolbox\\toolbox-mcp\\dist\\tool-contract.json",
+    }).mcp.contractPath,
+    "D:/Projects/toolbox/toolbox-mcp/dist/tool-contract.json",
+  );
+  assert.throws(
+    () => parseConfig({ TOOLBOX_ROUTER_MCP_CONTRACT_PATH: "dist/tool-contract.json" }),
+    /absolute local drive path/,
+  );
+});
+
+test("upstream maxRetries is bounded", () => {
+  const bridgeEnv = {
+    TOOLBOX_ROUTER_MODE: "bridge",
+    TOOLBOX_ROUTER_UPSTREAM_BASE_URL: "http://localhost:7770/v1",
+    TOOLBOX_ROUTER_UPSTREAM_API_KEY: "upstream-test-key",
+    TOOLBOX_ROUTER_UPSTREAM_MODEL: "test-model",
+  };
+  const config = parseConfig({ ...bridgeEnv, TOOLBOX_ROUTER_UPSTREAM_MAX_RETRIES: "3" });
+  assert.equal(config.upstream.maxRetries, 3);
+  assert.equal(parseConfig(bridgeEnv).upstream.maxRetries, 2);
+  assert.throws(() => parseConfig({ ...bridgeEnv, TOOLBOX_ROUTER_UPSTREAM_MAX_RETRIES: "4" }));
+});
