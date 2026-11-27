@@ -48,6 +48,12 @@ function isAuthorized(request, apiKey) {
   return match?.[1] === apiKey;
 }
 
+/** The address a request came from, without the IPv4-mapped IPv6 prefix. */
+function clientAddress(request) {
+  const address = request.socket?.remoteAddress ?? "";
+  return address.startsWith("::ffff:") ? address.slice(7) : address || "unknown";
+}
+
 async function readJson(request) {
   // Reject an unsupported media type before reading the body.
   const contentType = request.headers["content-type"]?.split(";")[0].trim().toLowerCase();
@@ -453,6 +459,7 @@ export function createRouterServer({
           JSON.stringify({
             event: "chat_request",
             request_id: requestId,
+            client: clientAddress(request),
             model: selectedModel.id,
             stream: payload.stream === true,
             tool_choice: ["auto", "none", "required"].includes(payload.tool_choice)

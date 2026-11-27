@@ -514,6 +514,21 @@ test("request logs never include caller-supplied tool-choice contents", async ()
   });
   assert.doesNotMatch(entries.join("\n"), /SYNTHETIC-PRIVATE-DATA/);
 });
+
+test("chat request logs record the calling client address", async () => {
+  const entries = [];
+  await withRouter({ bridge: readyBridge(), upstream: { async complete() { return completion({ role: "assistant", content: "ok" }); } }, logger: { info: line => entries.push(line), error: line => entries.push(line) } }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: "POST", headers: headers(),
+      body: JSON.stringify({ model: "toolbox-spike", messages: [{ role: "user", content: "hello" }] }),
+    });
+    assert.equal(response.status, 200);
+  });
+
+  const chatRequest = entries.map((line) => JSON.parse(line)).find((entry) => entry.event === "chat_request");
+  assert.ok(chatRequest, "expected a chat_request log entry");
+  assert.equal(chatRequest.client, "127.0.0.1");
+});
 test("unreachable upstream returns a gateway error", async () => {
   await withRouter({ bridge: readyBridge(), upstream: { async complete() { throw new UpstreamError("connection failed", 0, "upstream_network_error"); } }, logger: { info() {}, error() {} } }, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/v1/chat/completions`, { method: "POST", headers: headers(), body: JSON.stringify({ model: "toolbox-spike", messages: [{ role: "user", content: "hello" }] }) });
