@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 
 import { parseConfig } from "../src/config.mjs";
-import { boundedModelId, validateChatPayload } from "../src/request-validation.mjs";
+import { boundedModelId, toolChoiceLabel, validateChatPayload } from "../src/request-validation.mjs";
 import { createRouterServer } from "../src/server.mjs";
 
 const silentLogger = {
@@ -231,6 +231,16 @@ test("validateChatPayload rejects malformed messages, tools, tool_choice, stream
   assert.throws(() => validateChatPayload({ ...base, model: "" }), (e) => e.code === "invalid_model");
   assert.doesNotThrow(() => validateChatPayload(base));
   assert.doesNotThrow(() => validateChatPayload({ ...base, tool_choice: "required", stream: true }));
+});
+
+test("toolChoiceLabel names the steering mode without echoing caller contents", () => {
+  assert.equal(toolChoiceLabel("auto"), "auto");
+  assert.equal(toolChoiceLabel("none"), "none");
+  assert.equal(toolChoiceLabel("required"), "required");
+  assert.equal(toolChoiceLabel({ type: "function", function: { name: "system_stats" } }), "specific");
+  assert.equal(toolChoiceLabel(undefined), "unspecified");
+  assert.equal(toolChoiceLabel(null), "unspecified");
+  assert.equal(toolChoiceLabel("bogus"), "unspecified");
 });
 
 test("boundedModelId strips control characters and caps length", () => {

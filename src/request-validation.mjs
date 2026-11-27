@@ -67,6 +67,13 @@ function isValidToolChoice(choice) {
   );
 }
 
+/** How the request steered tool use, in a form that is safe to log. */
+export function toolChoiceLabel(choice) {
+  if (typeof choice === "string") return TOOL_CHOICE_STRINGS.has(choice) ? choice : "unspecified";
+  if (choice !== null && typeof choice === "object") return "specific";
+  return "unspecified";
+}
+
 export function validateChatPayload(payload) {
   if (payload === null || typeof payload !== "object") {
     throw new RequestValidationError("Request body must be a JSON object", "invalid_payload");

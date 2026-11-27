@@ -7,7 +7,7 @@ import { ChatLoopError, runChatLoop } from "./chat-loop.mjs";
 import { assertModelAvailable, CapacityError, filterModelsByCapacity, inspectCapacity } from "./capacity.mjs";
 import { advertisedHost, assertSecureRouterKey, parseConfig } from "./config.mjs";
 import { ToolboxMcpBridge } from "./mcp-bridge.mjs";
-import { RequestValidationError, boundedModelId, validateChatPayload } from "./request-validation.mjs";
+import { RequestValidationError, boundedModelId, toolChoiceLabel, validateChatPayload } from "./request-validation.mjs";
 import { createUpstreamClient, UpstreamError } from "./upstream.mjs";
 
 const MODEL_ID = "toolbox-spike";
@@ -462,9 +462,7 @@ export function createRouterServer({
             client: clientAddress(request),
             model: selectedModel.id,
             stream: payload.stream === true,
-            tool_choice: ["auto", "none", "required"].includes(payload.tool_choice)
-              ? payload.tool_choice
-              : payload.tool_choice && typeof payload.tool_choice === "object" ? "specific" : "unspecified",
+            tool_choice: toolChoiceLabel(payload.tool_choice),
             tool_count: Array.isArray(payload.tools) ? payload.tools.length : 0,
             message_count: Array.isArray(payload.messages) ? payload.messages.length : 0,
           }),
