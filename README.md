@@ -4,6 +4,8 @@ Toolbox Router is an early-stage local model gateway with an OpenAI-compatible H
 
 This checkout was imported from `E:\_2026-AI\Projects\quoder\toolbox-router`, including its Git history and existing uncommitted changes. Runtime and test data from `D:\Projects\ToolboxRouter` was verified and moved here. The original source checkout remains in place. Runtime directories and credentials are ignored by Git. The default data path is `D:\Projects\toolbox\toolbox-router`; an explicit `TOOLBOX_ROUTER_DATA_DIR` still overrides it.
 
+When a client pins one function with an object-form `tool_choice`, the Router sends only that function upstream in the first model round. A small local model then has one schema to choose from instead of the whole merged catalogue, which is what makes the tool call happen at all on a 1.5B model. Later rounds relax the choice to `auto` and restore the merged list so the model can answer from the tool result. A pinned name the Router does not expose keeps the full catalogue.
+
 ## Development and verification
 
 Node.js 22 or later is required to develop this source checkout. Install the locked dependencies with `npm ci`, then run:

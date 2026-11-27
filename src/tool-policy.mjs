@@ -66,6 +66,14 @@ export function classifyTool(name) {
   return "external";
 }
 
+/** The function a client pins with an object-form tool_choice, or "" when none is pinned. */
+export function namedToolChoice(choice) {
+  if (choice === null || typeof choice !== "object") return "";
+  if (choice.type !== "function") return "";
+  const name = choice.function?.name;
+  return typeof name === "string" && name.length > 0 ? name : "";
+}
+
 export function mcpToolToOpenAI(tool) {
   const schema =
     tool?.inputSchema && typeof tool.inputSchema === "object" && !Array.isArray(tool.inputSchema)

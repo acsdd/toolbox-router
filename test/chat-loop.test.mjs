@@ -116,6 +116,42 @@ test("chat loop relaxes forced tool choice after executing tools so the model ca
   assert.equal(requests[1].tool_choice, "auto");
 });
 
+test("chat loop sends only the pinned tool upstream when tool_choice names a function", async () => {
+  const requests = [];
+  const upstream = scriptedUpstream(
+    [
+      completion({ role: "assistant", content: null, tool_calls: [toolCall("system_stats")] }),
+      completion({ role: "assistant", content: "CPU is 12 percent" }),
+    ],
+    requests,
+  );
+
+  const result = await run({ tool_choice: { type: "function", function: { name: "system_stats" } } }, upstream);
+
+  assert.deepEqual(requests[0].tools.map((tool) => tool.function.name), ["system_stats"]);
+  assert.deepEqual(requests[1].tools.map((tool) => tool.function.name), ["system_stats", "widgets_export"]);
+  assert.equal(requests[1].tool_choice, "auto");
+  assert.equal(result.message.content, "CPU is 12 percent");
+});
+
+test("chat loop keeps the full catalogue when the pinned tool is unknown", async () => {
+  const requests = [];
+  const upstream = scriptedUpstream([completion({ role: "assistant", content: "no answer" })], requests);
+
+  await run({ tool_choice: { type: "function", function: { name: "not_a_known_tool" } } }, upstream);
+
+  assert.deepEqual(requests[0].tools.map((tool) => tool.function.name), ["system_stats", "widgets_export"]);
+});
+
+test("chat loop keeps the full catalogue for steering modes that pin no function", async () => {
+  const requests = [];
+  const upstream = scriptedUpstream([completion({ role: "assistant", content: "no answer" })], requests);
+
+  await run({ tool_choice: "required" }, upstream);
+
+  assert.deepEqual(requests[0].tools.map((tool) => tool.function.name), ["system_stats", "widgets_export"]);
+});
+
 test("chat loop preserves provider tool-call metadata across a tool round", async () => {
   const requests = [];
   const call = { ...toolCall("system_stats"), extra_content: { google: { thought_signature: "opaque-test-signature" } } };

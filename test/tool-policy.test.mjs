@@ -7,6 +7,7 @@ import {
   classifyTool,
   mergeTools,
   mcpToolToOpenAI,
+  namedToolChoice,
   parseToolArguments,
 } from "../src/tool-policy.mjs";
 
@@ -143,4 +144,14 @@ test("router-only restricted calls return a structured approval result without a
     tool: "widgets_export",
     message: "This Toolbox tool requires Qoder approval and was not executed by the router.",
   });
+});
+
+test("named tool choice reports the pinned function and ignores other steering modes", () => {
+  assert.equal(namedToolChoice({ type: "function", function: { name: "crypto_status" } }), "crypto_status");
+  assert.equal(namedToolChoice("auto"), "");
+  assert.equal(namedToolChoice("required"), "");
+  assert.equal(namedToolChoice(undefined), "");
+  assert.equal(namedToolChoice(null), "");
+  assert.equal(namedToolChoice({ type: "function", function: {} }), "");
+  assert.equal(namedToolChoice({ type: "function" }), "");
 });

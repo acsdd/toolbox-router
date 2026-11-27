@@ -2,6 +2,7 @@ import {
   approvalRequiredResult,
   classifyTool,
   mergeTools,
+  namedToolChoice,
   parseToolArguments,
 } from "./tool-policy.mjs";
 
@@ -69,6 +70,20 @@ function toolResultText(name, result) {
   return result?.content ?? "";
 }
 
+/**
+ * A client that pins one function with an object-form tool_choice means "call
+ * exactly this". Sending the whole catalogue invites a small local model to
+ * pick the wrong schema, so the pinned tool travels upstream on its own.
+ * An unknown pinned name keeps the full catalogue, because the router cannot
+ * offer a tool it does not expose.
+ */
+function toolsForChoice(tools, toolChoice) {
+  const name = namedToolChoice(toolChoice);
+  if (!name) return tools;
+  const pinned = tools.filter((tool) => toolName(tool) === name);
+  return pinned.length > 0 ? pinned : tools;
+}
+
 export async function runChatLoop({ payload, config, upstream, upstreamModel, bridge, logger = console, signal, requestId }) {
   throwIfCancelled(signal);
   if (!bridge?.ready) {
@@ -79,13 +94,17 @@ export async function runChatLoop({ payload, config, upstream, upstreamModel, br
   const clientNames = new Set(clientTools.map(toolName).filter(Boolean));
   const bridgeNames = new Set(bridge.tools.map(toolName));
   const tools = mergeTools(clientTools, bridge.tools);
+  const pinnedTools = toolsForChoice(tools, payload.tool_choice);
   const messages = payload.messages.map((message) => ({ ...message }));
   const usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
   const startedAt = Date.now();
 
   for (let round = 1; round <= config.limits.maxModelRounds; round += 1) {
     throwIfCancelled(signal);
-    const roundPayload = { ...payload, messages, tools };
+    // The pinned tool guides the first round only. Later rounds relax the
+    // choice to "auto" and restore the full catalogue so the model can answer
+    // from the tool result instead of repeating the same call.
+    const roundPayload = { ...payload, messages, tools: round === 1 ? pinnedTools : tools };
     if (round > 1 && payload.tool_choice !== undefined) roundPayload.tool_choice = "auto";
     const options = {
       ...(upstreamModel ? { model: upstreamModel } : {}),
