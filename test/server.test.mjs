@@ -250,6 +250,20 @@ test("chat rejects non-JSON content type with 415", async () => {
   assert.equal(body.error.code, "unsupported_media_type");
 });
 
+test("chat rejects an oversized body with a delivered 413", async () => {
+  const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+    method: "POST",
+    headers: { authorization: "Bearer test-key-123", "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "toolbox-spike",
+      messages: [{ role: "user", content: "x".repeat(3 * 1024 * 1024) }],
+    }),
+  });
+  const body = await response.json();
+  assert.equal(response.status, 413);
+  assert.equal(body.error.code, "request_too_large");
+});
+
 test("chat validates payload shape and returns a request id header", async () => {
   const bad = await fetch(`${baseUrl}/v1/chat/completions`, {
     method: "POST",

@@ -99,6 +99,19 @@ function parseRetryAfterMs(header) {
   return 0;
 }
 
+function cancelledError() {
+  return new UpstreamError("Upstream Chat Completions request was cancelled", 499, "upstream_cancelled");
+}
+
+function toUpstreamError(error, { signal, timedOut, controller, timeoutMs }) {
+  if (error instanceof UpstreamError) return error;
+  if (signal?.aborted) return cancelledError();
+  if (timedOut || controller.signal.aborted) {
+    return new UpstreamError(`Upstream Chat Completions timed out after ${timeoutMs}ms`, 504, "upstream_timeout");
+  }
+  return new UpstreamError("Upstream Chat Completions request failed", 0, "upstream_network_error");
+}
+
 function isRetryable(error) {
   if (!(error instanceof UpstreamError)) return false;
   if (["upstream_provider_state", "upstream_timeout", "upstream_cancelled", "invalid_upstream_json", "invalid_upstream_response"].includes(error.code)) return false;
@@ -108,14 +121,19 @@ function isRetryable(error) {
 function abortableDelay(ms, signal) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
-      reject(new UpstreamError("Upstream Chat Completions request was cancelled", 499, "upstream_cancelled"));
+      reject(cancelledError());
       return;
     }
-    const timer = setTimeout(resolve, ms);
-    const onAbort = () => {
+    function onAbort() {
       clearTimeout(timer);
-      reject(new UpstreamError("Upstream Chat Completions request was cancelled", 499, "upstream_cancelled"));
-    };
+      reject(cancelledError());
+    }
+    const timer = setTimeout(() => {
+      // Drop the listener once the wait is over so a long-lived signal does not
+      // accumulate one listener per retry.
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
     signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
@@ -134,6 +152,7 @@ export function createUpstreamClient({
   }
 
   const endpoint = `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
+  const retries = Math.max(0, Math.floor(Number(maxRetries) || 0));
 
   return {
     endpoint,
@@ -148,7 +167,7 @@ export function createUpstreamClient({
       }
       if (Array.isArray(payload.tools) && payload.tools.length > 0) body.tools = payload.tools;
 
-      async function attemptOnce() {
+      async function attemptOnce(attempt) {
         const controller = new AbortController();
         const requestSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
         let timedOut = false;
@@ -203,35 +222,30 @@ export function createUpstreamClient({
           );
           return validateCompletion(parsed);
         } catch (error) {
-          if (error instanceof UpstreamError) {
-            logger.error(
-              JSON.stringify({
-                event: "upstream_request",
-                model: selectedModel,
-                status: error.status,
-                duration_ms: Date.now() - startedAt,
-                error: redact(error.message, apiKey),
-              }),
-            );
-            throw error;
-          }
-          if (signal?.aborted) {
-            throw new UpstreamError("Upstream Chat Completions request was cancelled", 499, "upstream_cancelled");
-          }
-          if (timedOut || controller.signal.aborted) {
-            throw new UpstreamError(`Upstream Chat Completions timed out after ${timeoutMs}ms`, 504, "upstream_timeout");
-          }
-          throw new UpstreamError("Upstream Chat Completions request failed", 0, "upstream_network_error");
+          const failure = toUpstreamError(error, { signal, timedOut, controller, timeoutMs });
+          const entry = JSON.stringify({
+            event: "upstream_request",
+            model: selectedModel,
+            attempt: attempt + 1,
+            status: failure.status,
+            duration_ms: Date.now() - startedAt,
+            error: redact(failure.message, apiKey),
+          });
+          // Only the last attempt is a failure worth an error entry; the ones
+          // before it are retries and stay at info level.
+          if (attempt >= retries) logger.error(entry);
+          else logger.info(entry);
+          throw failure;
         } finally {
           clearTimeout(timer);
         }
       }
 
-      for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+      for (let attempt = 0; attempt <= retries; attempt += 1) {
         try {
-          return await attemptOnce();
+          return await attemptOnce(attempt);
         } catch (error) {
-          if (!isRetryable(error) || attempt === maxRetries || signal?.aborted) throw error;
+          if (!isRetryable(error) || attempt === retries || signal?.aborted) throw error;
           const base = Math.min(250 * 2 ** attempt, 5000);
           const jitter = Math.floor(Math.random() * 100);
           const delayMs = Math.max(error.retryAfterMs ?? 0, base) + jitter;
@@ -247,6 +261,8 @@ export function createUpstreamClient({
           await abortableDelay(delayMs, signal);
         }
       }
+      // The loop above always returns or throws; this keeps the contract explicit.
+      throw new UpstreamError("Upstream Chat Completions request failed", 0, "upstream_network_error");
     },
   };
 }

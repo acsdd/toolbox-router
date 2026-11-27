@@ -432,3 +432,14 @@ test("maxRetries 0 disables retry", async () => {
   await assert.rejects(() => client.complete({ messages: [] }));
   assert.equal(calls, 1);
 });
+
+test("a negative maxRetries is clamped to no retry", async () => {
+  let calls = 0;
+  const client = createUpstreamClient({
+    baseUrl: "http://127.0.0.1:9/v1", apiKey: "k", model: "m", timeoutMs: 1000, maxRetries: -3,
+    logger: { info() {}, error() {} },
+    fetchImpl: async () => { calls += 1; return jsonResponse({ error: "boom" }, 503); },
+  });
+  await assert.rejects(() => client.complete({ messages: [] }));
+  assert.equal(calls, 1);
+});

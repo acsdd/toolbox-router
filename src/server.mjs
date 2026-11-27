@@ -12,7 +12,6 @@ import { createUpstreamClient, UpstreamError } from "./upstream.mjs";
 
 const MODEL_ID = "toolbox-spike";
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
-const MAX_DRAIN_BYTES = 10 * 1024 * 1024;
 
 class HttpError extends Error {
   constructor(status, message, code) {
@@ -50,6 +49,12 @@ function isAuthorized(request, apiKey) {
 }
 
 async function readJson(request) {
+  // Reject an unsupported media type before reading the body.
+  const contentType = request.headers["content-type"]?.split(";")[0].trim().toLowerCase();
+  if (contentType !== "application/json") {
+    throw new HttpError(415, "Content-Type must be application/json", "unsupported_media_type");
+  }
+
   const chunks = [];
   let size = 0;
   let overflow = false;
@@ -57,21 +62,15 @@ async function readJson(request) {
   for await (const chunk of request) {
     size += chunk.length;
     if (size > MAX_BODY_BYTES) {
+      // Keep draining so the client can finish sending and still receives a
+      // status code, but stop buffering the oversized body.
       overflow = true;
       chunks.length = 0;
-      if (size > MAX_DRAIN_BYTES) {
-        request.destroy();
-        throw new HttpError(413, "Request body is too large", "request_too_large");
-      }
       continue;
     }
-    if (!overflow) chunks.push(chunk);
+    chunks.push(chunk);
   }
 
-  const contentType = request.headers["content-type"]?.split(";")[0].trim().toLowerCase();
-  if (contentType !== "application/json") {
-    throw new HttpError(415, "Content-Type must be application/json", "unsupported_media_type");
-  }
   if (overflow) throw new HttpError(413, "Request body is too large", "request_too_large");
   if (chunks.length === 0) {
     throw new HttpError(400, "Request body must be valid JSON", "invalid_json");
@@ -455,12 +454,12 @@ export function createRouterServer({
             event: "chat_request",
             request_id: requestId,
             model: selectedModel.id,
-            stream: payload?.stream === true,
-            tool_choice: ["auto", "none", "required"].includes(payload?.tool_choice)
+            stream: payload.stream === true,
+            tool_choice: ["auto", "none", "required"].includes(payload.tool_choice)
               ? payload.tool_choice
-              : payload?.tool_choice && typeof payload.tool_choice === "object" ? "specific" : "unspecified",
-            tool_count: Array.isArray(payload?.tools) ? payload.tools.length : 0,
-            message_count: Array.isArray(payload?.messages) ? payload.messages.length : 0,
+              : payload.tool_choice && typeof payload.tool_choice === "object" ? "specific" : "unspecified",
+            tool_count: Array.isArray(payload.tools) ? payload.tools.length : 0,
+            message_count: Array.isArray(payload.messages) ? payload.messages.length : 0,
           }),
         );
 
@@ -471,7 +470,14 @@ export function createRouterServer({
           if (!bridge.ready && typeof bridge.ensureReady === "function") {
             try {
               await bridge.ensureReady();
-            } catch {
+            } catch (error) {
+              logger.error(
+                JSON.stringify({
+                  event: "bridge_not_ready",
+                  request_id: requestId,
+                  error: sanitizeErrorMessage(error?.message ?? String(error), config.upstream?.apiKey ?? ""),
+                }),
+              );
               throw new ChatLoopError("Toolbox MCP bridge is not ready", 503, "mcp_not_ready");
             }
           }
