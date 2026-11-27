@@ -19,6 +19,16 @@ export function assertSecureRouterKey(config) {
   }
 }
 
+/** A wildcard host listens on every interface and is advertised to clients as loopback. */
+export function isWildcardHost(host) {
+  return ["0.0.0.0", "::", "*"].includes(host.trim().toLowerCase());
+}
+
+/** The address clients should use to reach a Router bound to the given host. */
+export function advertisedHost(host) {
+  return isWildcardHost(host) ? "127.0.0.1" : host;
+}
+
 function readInteger(env, name, fallback, min, max) {
   const raw = env[name]?.trim() || String(fallback);
   if (!/^\d+$/.test(raw)) {

@@ -7,7 +7,7 @@ import { dirname, join, resolve, win32 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
-import { assertSecureRouterKey, parseConfig } from "../src/config.mjs";
+import { advertisedHost, assertSecureRouterKey, isWildcardHost, parseConfig } from "../src/config.mjs";
 import { readQoderRouterKey } from "../src/router-credential.mjs";
 
 const SERVER_PATH = fileURLToPath(new URL("../src/server.mjs", import.meta.url));
@@ -448,9 +448,11 @@ async function main() {
   config.logFile = resolveLogPath(config);
 
   const local = ["127.0.0.1", "::1", "localhost"].includes(config.host.toLowerCase());
-  const adapter = local ? null : findIPv4Address(config.host);
-  if (!local && !adapter) throw new Error(`${config.host} is not assigned to an active IPv4 network adapter`);
-  console.log(local ? `[launcher] Using local address ${config.host}` : `[launcher] Using ${adapter.name}: ${config.host}/${adapter.netmask}`);
+  const wildcard = isWildcardHost(config.host);
+  const adapter = local || wildcard ? null : findIPv4Address(config.host);
+  if (!local && !wildcard && !adapter) throw new Error(`${config.host} is not assigned to an active IPv4 network adapter`);
+  if (wildcard) console.log(`[launcher] Listening on every interface (${config.host})`);
+  else console.log(local ? `[launcher] Using local address ${config.host}` : `[launcher] Using ${adapter.name}: ${config.host}/${adapter.netmask}`);
   await assertPortAvailable(config.host, config.port);
   console.log(`[launcher] Port ${config.port} is available`);
 
@@ -535,7 +537,7 @@ async function main() {
     process.on("SIGINT", onSignal);
     process.on("SIGTERM", onSignal);
 
-    const rootUrl = `http://${config.host}:${config.port}`;
+    const rootUrl = `http://${advertisedHost(config.host)}:${config.port}`;
     const apiBaseUrl = `${rootUrl}/v1`;
     await waitForHealth(rootUrl, child, config.mode === "bridge" ? config.mcp.startupTimeoutMs + 10_000 : 10_000);
     console.log("[launcher] Health check passed");
@@ -551,6 +553,7 @@ async function main() {
     console.log(`  Base URL:  ${apiBaseUrl}`);
     console.log("  API key:   Use your configured Router key (never the AstrLink key)");
     console.log(`  Model ID:  ${model}`);
+    if (wildcard) console.log("  Note:      the Router also accepts requests from the local network");
     console.log(`  Log file:  ${config.logFile}`);
     console.log("");
 

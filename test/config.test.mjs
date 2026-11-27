@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assertSecureRouterKey, parseConfig } from "../src/config.mjs";
+import { advertisedHost, assertSecureRouterKey, isWildcardHost, parseConfig } from "../src/config.mjs";
 
 test("parseConfig defaults to a local-only spike address", () => {
   const config = parseConfig({});
@@ -31,6 +31,14 @@ test("non-loopback binding requires a non-default strong key", () => {
   assert.throws(() => parseConfig({ TOOLBOX_ROUTER_HOST: "0.0.0.0" }), /explicit API key/);
   assert.throws(() => parseConfig({ TOOLBOX_ROUTER_HOST: "192.168.1.2", TOOLBOX_ROUTER_API_KEY: "short-key" }), /explicit API key/);
   assert.equal(parseConfig({ TOOLBOX_ROUTER_HOST: "192.168.1.2", TOOLBOX_ROUTER_API_KEY: "example-test-key-123" }).host, "192.168.1.2");
+});
+
+test("wildcard hosts are advertised to clients as loopback", () => {
+  assert.equal(isWildcardHost("0.0.0.0"), true);
+  assert.equal(isWildcardHost("::"), true);
+  assert.equal(isWildcardHost("127.0.0.1"), false);
+  assert.equal(advertisedHost("0.0.0.0"), "127.0.0.1");
+  assert.equal(advertisedHost("192.168.1.2"), "192.168.1.2");
 });
 
 test("live bridge refuses the public preview key but mock remains available", () => {

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { ChatLoopError, runChatLoop } from "./chat-loop.mjs";
 import { assertModelAvailable, CapacityError, filterModelsByCapacity, inspectCapacity } from "./capacity.mjs";
-import { assertSecureRouterKey, parseConfig } from "./config.mjs";
+import { advertisedHost, assertSecureRouterKey, parseConfig } from "./config.mjs";
 import { ToolboxMcpBridge } from "./mcp-bridge.mjs";
 import { RequestValidationError, boundedModelId, validateChatPayload } from "./request-validation.mjs";
 import { createUpstreamClient, UpstreamError } from "./upstream.mjs";
@@ -654,7 +654,7 @@ async function start() {
         event: "ready",
         host: config.host,
         port: config.port,
-        base_url: `http://${config.host}:${config.port}/v1`,
+        base_url: `http://${advertisedHost(config.host)}:${config.port}/v1`,
         model: config.models[0].id,
         mode: config.mode,
         ready: config.mode === "mock" || bridge?.ready === true,
